@@ -1,0 +1,9 @@
+torch
+torchvision
+torchio
+pytorch3d
+diffdrr
+numpy
+matplotlib
+scikit-image
+nibabel
