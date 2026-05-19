@@ -67,11 +67,8 @@ DeepDRR provides physical accuracy with neural scatter estimation. It is officia
 # For CUDA 11.x:
 uv pip install deepdrr[cuda11x]
 
-# For CUDA 12.x:
+# For CUDA 12.x (including CUDA 12.8):
 uv pip install deepdrr[cuda12x]
-
-# For CUDA 12.8:
-uv pip install deepdrr[cuda128]
 ```
 
 ## 🧪 Usage
