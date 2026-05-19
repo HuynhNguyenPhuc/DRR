@@ -4,6 +4,8 @@ torchio
 pytorch3d
 diffdrr
 numpy
+scipy
 matplotlib
 scikit-image
 nibabel
+SimpleITK

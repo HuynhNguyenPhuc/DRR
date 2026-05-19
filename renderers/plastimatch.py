@@ -59,6 +59,11 @@ def generate_plastimatch_drr(
         # 4. Save CT volume
         image = sitk.GetImageFromArray(vol_np)
         image.SetSpacing([voxel_spacing, voxel_spacing, voxel_spacing])
+        # Center the volume at the world origin so the isocenter (0,0,0) passes
+        # through the volume midpoint — matching DVR, DiffDRR, and MC renderers.
+        # SimpleITK uses (x, y, z) order; vol_np axes are (D, H, W) = (z, y, x).
+        half = float(vol_np.shape[0]) * voxel_spacing / 2.0
+        image.SetOrigin([-half, -half, -half])
         sitk.WriteImage(image, in_path)
 
         # 5. Build plastimatch command
