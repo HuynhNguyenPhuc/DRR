@@ -54,7 +54,7 @@ def generate_plastimatch_drr(
     # 3. Create temporary directory
     with tempfile.TemporaryDirectory() as tmpdir:
         in_path = os.path.join(tmpdir, "ct.mha")
-        out_path = os.path.join(tmpdir, "drr.mha")
+        out_prefix = os.path.join(tmpdir, "drr.mha")  # Force mha format
 
         # 4. Save CT volume
         image = sitk.GetImageFromArray(vol_np)
@@ -73,18 +73,16 @@ def generate_plastimatch_drr(
 
         cmd = [
             "plastimatch", "drr",
-            "-t", "float",
-            "-a", "exact",           # Exact raytracing for Ground Truth
+            "-i", "exact",           # Exact raytracing for Ground Truth
             "-I", in_path,
-            "-O", out_path,
+            "-O", out_prefix,
             "-r", f"{image_size} {image_size}",
-            "-p", f"{fov} {fov}",
-            "-c", f"{geo.isocenter_x} {geo.isocenter_y} {geo.isocenter_z}", # Image center
+            "-z", f"{fov} {fov}",
             "-o", f"{geo.isocenter_x} {geo.isocenter_y} {geo.isocenter_z}", # Isocenter
             "--sid", str(geo.sdd),
             "--sad", str(geo.sad),
             "-n", f"{-geo.view_dir_x} {-geo.view_dir_y} {-geo.view_dir_z}", # Detector normal
-            "-v", f"{geo.up_vec_x} {geo.up_vec_y} {geo.up_vec_z}",          # Up vector
+            "--vup", f"{geo.up_vec_x} {geo.up_vec_y} {geo.up_vec_z}",       # Up vector
         ]
 
         # 6. Run plastimatch
@@ -95,10 +93,14 @@ def generate_plastimatch_drr(
             raise RuntimeError(f"Plastimatch command failed:\n{exc.stderr}") from exc
 
         # 7. Load DRR image
-        if not os.path.exists(out_path):
+        import glob
+        generated_files = glob.glob(out_prefix + "*")
+        if not generated_files:
             logger.error("[Plastimatch] Output file was not generated.")
             raise FileNotFoundError("Plastimatch output file was not generated.")
         
+        # Plastimatch appends 0000.ext to the output prefix
+        out_path = generated_files[0]
         drr_img = sitk.ReadImage(out_path)
         drr_np = sitk.GetArrayFromImage(drr_img)  # (1, H, W) or (H, W)
         
