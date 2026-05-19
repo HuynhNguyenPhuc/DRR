@@ -46,7 +46,8 @@ Install **PyTorch3D** (required for the DVR engine):
 # Install dependencies
 uv pip install fvcore iopath
 # Build PyTorch3D from source (requires C++ build tools)
-uv pip install "git+https://github.com/facebookresearch/pytorch3d.git"
+# --no-build-isolation is needed so the build script can access the installed PyTorch
+uv pip install "git+https://github.com/facebookresearch/pytorch3d.git" --no-build-isolation
 ```
 
 ### 3. Install Python Dependencies
