@@ -71,6 +71,13 @@ uv pip install deepdrr[cuda11x]
 uv pip install deepdrr[cuda12x]
 ```
 
+### 6. Setup Jupyter Kernel (For Sanity Check)
+To run the `sanity_check.ipynb` notebook, install `ipykernel` and register your virtual environment as a Jupyter kernel:
+```bash
+uv pip install ipykernel
+python -m ipykernel install --user --name drr_env --display-name "Python (DRR)"
+```
+
 ## 🧪 Usage
 
 ### 1. Sanity Check
