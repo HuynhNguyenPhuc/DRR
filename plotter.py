@@ -26,30 +26,32 @@ def plot_speed(speed_results: dict, out_dir) -> None:
         out_dir (pathlib.Path): Destination directory for
             ``speed_comparison.png``.
     """
-    dvr_data   = speed_results.get("dvr",     {})
-    ddrr_data  = speed_results.get("diffdrr", {})
-    res_list   = speed_results.get("resolutions", [])
+    dvr_data    = speed_results.get("dvr",     {})
+    ddrr_data   = speed_results.get("diffdrr", {})
+    ddrr_data2  = speed_results.get("deepdrr", {})
+    res_list    = speed_results.get("resolutions", [])
 
-    dvr_means  = [dvr_data.get(r,  {}).get("mean_ms") if dvr_data.get(r)  else None for r in res_list]
-    ddrr_means = [ddrr_data.get(r, {}).get("mean_ms") if ddrr_data.get(r) else None for r in res_list]
-    dvr_stds   = [dvr_data.get(r,  {}).get("std_ms", 0) if dvr_data.get(r)  else 0 for r in res_list]
-    ddrr_stds  = [ddrr_data.get(r, {}).get("std_ms", 0) if ddrr_data.get(r) else 0 for r in res_list]
+    renderers = [
+        ("DVR (PyTorch3D)",    dvr_data,   "#2196F3"),
+        ("DiffDRR (Siddon)",   ddrr_data,  "#FF5722"),
+        ("DeepDRR",            ddrr_data2, "#4CAF50"),
+    ]
 
     x     = np.arange(len(res_list))
-    width = 0.35
-    fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
+    n_r   = len(renderers)
+    width = 0.8 / n_r
+    fig, ax = plt.subplots(figsize=(9, 5), dpi=150)
 
-    if any(v is not None for v in dvr_means):
-        vals = [v if v is not None else 0 for v in dvr_means]
-        errs = [e if dvr_means[i] is not None else 0 for i, e in enumerate(dvr_stds)]
-        ax.bar(x - width / 2, vals, width, yerr=errs,
-               label="DVR (PyTorch3D)", capsize=4, color="#2196F3", alpha=0.85)
-
-    if any(v is not None for v in ddrr_means):
-        vals = [v if v is not None else 0 for v in ddrr_means]
-        errs = [e if ddrr_means[i] is not None else 0 for i, e in enumerate(ddrr_stds)]
-        ax.bar(x + width / 2, vals, width, yerr=errs,
-               label="DiffDRR (Siddon)", capsize=4, color="#FF5722", alpha=0.85)
+    for i, (label, data, color) in enumerate(renderers):
+        means = [data.get(r, {}).get("mean_ms") if data.get(r) else None for r in res_list]
+        stds  = [data.get(r, {}).get("std_ms", 0) if data.get(r) else 0 for r in res_list]
+        if not any(v is not None for v in means):
+            continue
+        offset = (i - (n_r - 1) / 2.0) * width
+        vals   = [v if v is not None else 0 for v in means]
+        errs   = [e if means[j] is not None else 0 for j, e in enumerate(stds)]
+        ax.bar(x + offset, vals, width, yerr=errs,
+               label=label, capsize=4, color=color, alpha=0.85)
 
     ax.set_xticks(x)
     ax.set_xticklabels([f"{r}×{r}" for r in res_list])
@@ -75,23 +77,34 @@ def plot_vram(vram_results: dict, out_dir) -> None:
         out_dir (pathlib.Path): Destination directory for
             ``vram_comparison.png``.
     """
-    dvr_data  = vram_results.get("dvr",     {})
-    ddrr_data = vram_results.get("diffdrr", {})
-    res_list  = vram_results.get("resolutions", [])
+    dvr_data    = vram_results.get("dvr",     {})
+    ddrr_data   = vram_results.get("diffdrr", {})
+    ddrr_data2  = vram_results.get("deepdrr", {})
+    res_list    = vram_results.get("resolutions", [])
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5), dpi=150)
+    renderers = [
+        ("DVR (PyTorch3D)",  dvr_data,  "#2196F3"),
+        ("DiffDRR (Siddon)", ddrr_data, "#FF5722"),
+        ("DeepDRR (fwd)",    ddrr_data2, "#4CAF50"),
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), dpi=150)
     for ax, key, label in zip(
         axes,
         ["fwd_mb", "bwd_mb"],
         ["Forward Pass", "Forward + Backward Pass"],
     ):
-        dvr_vals  = [dvr_data.get(r,  {}).get(key, 0) if dvr_data.get(r)  else 0 for r in res_list]
-        ddrr_vals = [ddrr_data.get(r, {}).get(key, 0) if ddrr_data.get(r) else 0 for r in res_list]
-
         x     = np.arange(len(res_list))
-        width = 0.35
-        ax.bar(x - width / 2, dvr_vals,  width, label="DVR (PyTorch3D)",  color="#2196F3", alpha=0.85)
-        ax.bar(x + width / 2, ddrr_vals, width, label="DiffDRR (Siddon)", color="#FF5722", alpha=0.85)
+        n_r   = len(renderers)
+        width = 0.8 / n_r
+
+        for i, (rname, data, color) in enumerate(renderers):
+            vals = [data.get(r, {}).get(key, 0) or 0 if data.get(r) else 0 for r in res_list]
+            if not any(v for v in vals):
+                continue
+            offset = (i - (n_r - 1) / 2.0) * width
+            ax.bar(x + offset, vals, width, label=rname, color=color, alpha=0.85)
+
         ax.set_xticks(x)
         ax.set_xticklabels([f"{r}×{r}" for r in res_list])
         ax.set_xlabel("Image Resolution")
@@ -161,20 +174,34 @@ def print_summary(results: dict) -> None:
     quality = results.get("quality", {})
     if quality:
         logger.info("")
-        logger.info("  ■ Image Quality vs Reference")
-        logger.info("  %20s  %10s  %10s  %8s  Ref",
+        logger.info("  ■ Image Quality vs Reference(s)")
+        logger.info("  %22s  %10s  %10s  %8s  Ref",
                     "Method", "RMSE", "PSNR (dB)", "SSIM")
         logger.info("  %s  %s  %s  %s  ---",
-                    "-" * 20, "-" * 10, "-" * 10, "-" * 8)
+                    "-" * 22, "-" * 10, "-" * 10, "-" * 8)
         for name, vals in quality.items():
-            logger.info(
-                "  %20s  %10s  %10.2f  %8.4f  %s",
-                name,
-                f"{vals['rmse']:.4e}",
-                vals["psnr"],
-                vals["ssim"],
-                vals.get("reference", "?"),
-            )
+            # vals may be a flat dict (legacy) or a nested dict keyed by GT name
+            if isinstance(vals, dict) and any(
+                isinstance(v, dict) for v in vals.values()
+            ):
+                for ref_key, metrics in vals.items():
+                    logger.info(
+                        "  %22s  %10s  %10.2f  %8.4f  %s",
+                        name,
+                        f"{metrics['rmse']:.4e}",
+                        metrics["psnr"],
+                        metrics["ssim"],
+                        metrics.get("reference", ref_key),
+                    )
+            else:
+                logger.info(
+                    "  %22s  %10s  %10.2f  %8.4f  %s",
+                    name,
+                    f"{vals['rmse']:.4e}",
+                    vals["psnr"],
+                    vals["ssim"],
+                    vals.get("reference", "?"),
+                )
 
     # Optimisation table
     opt = results.get("optimization", {})

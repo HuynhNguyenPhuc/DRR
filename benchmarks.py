@@ -13,7 +13,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from utils.logger import get_logger
-from renderers import build_dvr_renderer, build_diffdrr_renderer
+from renderers import (
+    build_dvr_renderer,
+    build_diffdrr_renderer,
+    generate_plastimatch_drr,
+    generate_mc_drr,
+    generate_deepdrr_drr,
+)
+from renderers.config import DEFAULT_GEOMETRY
 from utils import time_fn, peak_vram, zncc_loss, compute_metrics
 
 logger = get_logger(__name__)
@@ -43,7 +50,7 @@ def run_speed(volume_tensor, subject, resolutions, n_pts, ct_size, voxel_spacing
     logger.info("  BENCHMARK 1 — Rendering Speed")
     logger.info("─" * 64)
 
-    results = {"resolutions": resolutions, "dvr": {}, "diffdrr": {}}
+    results = {"resolutions": resolutions, "dvr": {}, "diffdrr": {}, "deepdrr": {}}
 
     for res in resolutions:
         logger.info("  Resolution: %d×%d", res, res)
@@ -62,7 +69,7 @@ def run_speed(volume_tensor, subject, resolutions, n_pts, ct_size, voxel_spacing
             results["dvr"][res] = None
 
         # DiffDRR
-        drr, rot, xyz = build_diffdrr_renderer(res, ct_size, subject, 2.0, device)
+        drr, rot, xyz = build_diffdrr_renderer(res, ct_size, subject, voxel_spacing, device)
         if drr is not None:
             def _diffdrr():
                 return drr(rot, xyz, parameterization="euler_angles", convention="ZXY")
@@ -72,6 +79,18 @@ def run_speed(volume_tensor, subject, resolutions, n_pts, ct_size, voxel_spacing
         else:
             logger.info("    DiffDRR : UNAVAILABLE")
             results["diffdrr"][res] = None
+
+        # DeepDRR (forward pass only; not differentiable)
+        def _deepdrr():
+            return generate_deepdrr_drr(volume_tensor, voxel_spacing, res, device)
+        img_check = _deepdrr()
+        if img_check is not None:
+            mean_ms, std_ms = time_fn(_deepdrr, device, warmup, repeats)
+            logger.info("    DeepDRR : %7.1f ± %5.1f ms", mean_ms, std_ms)
+            results["deepdrr"][res] = {"mean_ms": mean_ms, "std_ms": std_ms}
+        else:
+            logger.info("    DeepDRR : UNAVAILABLE")
+            results["deepdrr"][res] = None
 
     return results
 
@@ -98,7 +117,7 @@ def run_vram(volume_tensor, subject, resolutions, n_pts, ct_size, voxel_spacing,
     logger.info("  BENCHMARK 2 — VRAM Footprint (peak MB)")
     logger.info("─" * 64)
 
-    results = {"resolutions": resolutions, "dvr": {}, "diffdrr": {}}
+    results = {"resolutions": resolutions, "dvr": {}, "diffdrr": {}, "deepdrr": {}}
 
     for res in resolutions:
         logger.info("  Resolution: %d×%d", res, res)
@@ -126,7 +145,7 @@ def run_vram(volume_tensor, subject, resolutions, n_pts, ct_size, voxel_spacing,
             results["dvr"][res] = None
 
         # DiffDRR
-        drr, rot, xyz = build_diffdrr_renderer(res, ct_size, subject, 2.0, device)
+        drr, rot, xyz = build_diffdrr_renderer(res, ct_size, subject, voxel_spacing, device)
         if drr is not None:
             rot = rot.clone().requires_grad_(True)
             xyz = xyz.clone().requires_grad_(True)
@@ -145,6 +164,26 @@ def run_vram(volume_tensor, subject, resolutions, n_pts, ct_size, voxel_spacing,
         else:
             logger.info("    DiffDRR : UNAVAILABLE")
             results["diffdrr"][res] = None
+
+        # DeepDRR (uses cupy internally; torch.cuda memory counters won't reflect
+        # cupy allocations, so fwd_mb is an approximation of PyTorch-visible VRAM)
+        def _fwd_deepdrr():
+            return generate_deepdrr_drr(volume_tensor, voxel_spacing, res, device)
+        img_check = _fwd_deepdrr()
+        if img_check is not None:
+            try:
+                fwd_mb, bwd_mb = peak_vram(_fwd_deepdrr, device)
+                logger.info(
+                    "    DeepDRR : fwd %7.1f MB  |  (no backward — not differentiable)",
+                    fwd_mb,
+                )
+                results["deepdrr"][res] = {"fwd_mb": fwd_mb, "bwd_mb": None}
+            except Exception as exc:
+                logger.warning("    DeepDRR : ERROR — %s", exc)
+                results["deepdrr"][res] = None
+        else:
+            logger.info("    DeepDRR : UNAVAILABLE (requires deepdrr + CUDA/Linux)")
+            results["deepdrr"][res] = None
 
     return results
 
@@ -178,64 +217,87 @@ def run_quality(volume_tensor, subject, n_pts, ct_size, voxel_spacing, device, o
     images  = {}
     vol     = volume_tensor.to(device)
 
-    # Plastimatch Ground Truth
+    # ── Ground Truth references ───────────────────────────────────────────────
+
+    # Plastimatch GT (exact geometric ray-tracing on CPU)
     from renderers.plastimatch import generate_plastimatch_drr
     img_plastimatch = generate_plastimatch_drr(volume_tensor, voxel_spacing, RES, device)
-    images["plastimatch"] = img_plastimatch
-    logger.info("    Plastimatch (GT)  rendered: shape %s", tuple(img_plastimatch.shape))
+    images["plastimatch_gt"] = img_plastimatch
+    logger.info("    Plastimatch (GT)      rendered: shape %s", tuple(img_plastimatch.shape))
 
-    # Render with each available renderer
+    # Monte Carlo GT (polychromatic + scatter on CPU)
+    img_mc = generate_mc_drr(volume_tensor, voxel_spacing, RES, device)
+    if img_mc is not None:
+        images["monte_carlo_gt"] = img_mc
+        logger.info("    Monte Carlo (GT)      rendered: shape %s", tuple(img_mc.shape))
+    else:
+        logger.warning("    Monte Carlo (GT)      : FAILED")
+
+    # ── Fast / differentiable renderers ───────────────────────────────────────
     renderer, cameras = build_dvr_renderer(RES, n_pts, ct_size, voxel_spacing, device)
     if renderer is not None:
         with torch.no_grad():
             img_dvr = renderer(vol, cameras, norm_type="normalized")
         images["dvr"] = img_dvr
-        logger.info("    DVR     rendered: shape %s", tuple(img_dvr.shape))
+        logger.info("    DVR               rendered: shape %s", tuple(img_dvr.shape))
     else:
-        logger.info("    DVR     : UNAVAILABLE — skipping quality check for DVR.")
+        logger.info("    DVR               : UNAVAILABLE — skipping quality check for DVR.")
 
-    drr_siddon, rot, xyz = build_diffdrr_renderer(RES, ct_size, subject, 2.0, device)
+    drr_siddon, rot, xyz = build_diffdrr_renderer(RES, ct_size, subject, voxel_spacing, device)
     if drr_siddon is not None:
         with torch.no_grad():
             img_siddon = drr_siddon(rot, xyz, parameterization="euler_angles", convention="ZXY")
-        images["siddon"] = img_siddon
+        images["diffdrr_siddon"] = img_siddon
         logger.info("    DiffDRR (Siddon)  rendered: shape %s", tuple(img_siddon.shape))
 
     try:
         from diffdrr.drr import DRR as DiffDRR_module
-        sp   = 2.0
-        delx = ct_size * sp / RES
+        delx = ct_size * voxel_spacing / RES
         drr_tri = DiffDRR_module(
             subject,
-            sdd      = 1020.0,
+            sdd      = DEFAULT_GEOMETRY.sdd,
             height   = RES,
             delx     = delx,
             renderer = "trilinear",
         ).to(device)
         with torch.no_grad():
             img_trilinear = drr_tri(rot, xyz, parameterization="euler_angles", convention="ZXY")
-        images["trilinear"] = img_trilinear
+        images["diffdrr_trilinear"] = img_trilinear
         logger.info("    DiffDRR (Trilinear) rendered: shape %s", tuple(img_trilinear.shape))
     except Exception as exc:
         logger.debug("    DiffDRR trilinear: skipped (%s)", exc)
 
-    # Enforce Plastimatch as Ground Truth
-    ref_key = "plastimatch"
-    ref_img = images["plastimatch"]
-    ref_label = "Plastimatch GT"
+    # DeepDRR (physics-based, DL scatter, validated against MC)
+    img_deepdrr = generate_deepdrr_drr(volume_tensor, voxel_spacing, RES, device)
+    if img_deepdrr is not None:
+        images["deepdrr"] = img_deepdrr
+        logger.info("    DeepDRR           rendered: shape %s", tuple(img_deepdrr.shape))
+    else:
+        logger.info("    DeepDRR           : UNAVAILABLE (requires deepdrr + CUDA/Linux)")
+
+    # ── Metrics vs both Ground Truth references ───────────────────────────────
+    # Primary GT: Plastimatch (geometric accuracy benchmark, as in DiffDRR paper).
+    # Secondary GT: Monte Carlo (physical accuracy benchmark).
+    GT_REFS = {
+        k: (v, k.replace("_", " ").replace("gt", "GT").title())
+        for k, v in images.items()
+        if k.endswith("_gt")
+    }
 
     logger.info("")
     for name, img in images.items():
-        if name == ref_key:
-            continue
+        if name.endswith("_gt"):
+            continue   # skip GT-vs-GT comparisons
 
-        rmse, psnr, ssim = compute_metrics(img, ref_img)
-        label = f"{name} vs {ref_label}"
-        logger.info(
-            "    %-35s  RMSE=%.4e  PSNR=%6.2f dB  SSIM=%.4f",
-            label, rmse, psnr, ssim,
-        )
-        results[name] = {"rmse": rmse, "psnr": psnr, "ssim": ssim, "reference": ref_label}
+        for ref_key, (ref_img, ref_label) in GT_REFS.items():
+            rmse, psnr, ssim = compute_metrics(img, ref_img)
+            label = f"{name} vs {ref_label}"
+            logger.info(
+                "    %-40s  RMSE=%.4e  PSNR=%6.2f dB  SSIM=%.4f",
+                label, rmse, psnr, ssim,
+            )
+            entry = results.setdefault(name, {})
+            entry[ref_key] = {"rmse": rmse, "psnr": psnr, "ssim": ssim, "reference": ref_label}
 
     # Save side-by-side comparison figure
     if images:
@@ -247,7 +309,9 @@ def run_quality(volume_tensor, subject, n_pts, ct_size, voxel_spacing, device, o
             im_np = img.detach().cpu().squeeze().numpy()
             im_np = (im_np - im_np.min()) / (im_np.max() - im_np.min() + 1e-8)
             ax.imshow(im_np, cmap="gray")
-            ax.set_title(name, fontsize=10)
+            # Add GT marker to title for clarity
+            title = name.replace("_gt", " [GT]").replace("_", "\n")
+            ax.set_title(title, fontsize=9)
             ax.axis("off")
         fig.suptitle("Image Quality Comparison (200×200)", fontsize=12, y=1.02)
         fig.tight_layout()
@@ -373,18 +437,25 @@ def run_optimization(volume_tensor, subject, n_pts, ct_size, voxel_spacing, opt_
 
         logger.info("")
         logger.info("  [DiffDRR] Setting up registration ...")
-        sp   = 2.0
-        delx = ct_size * sp / OPT_RES
+        delx = ct_size * voxel_spacing / OPT_RES
 
-        drr     = DiffDRR_module(subject, sdd=1020.0, height=OPT_RES, delx=delx).to(device)
+        drr     = DiffDRR_module(subject, sdd=DEFAULT_GEOMETRY.sdd, height=OPT_RES, delx=delx).to(device)
         rot_gt  = torch.tensor([[0.0, 0.0, 0.0]], device=device)
-        xyz_gt  = torch.tensor([[0.0, 850.0, 0.0]], device=device)
+        xyz_gt  = torch.tensor([[
+            DEFAULT_GEOMETRY.sad * DEFAULT_GEOMETRY.view_dir_x,
+            DEFAULT_GEOMETRY.sad * DEFAULT_GEOMETRY.view_dir_y,
+            DEFAULT_GEOMETRY.sad * DEFAULT_GEOMETRY.view_dir_z,
+        ]], device=device)
         with torch.no_grad():
             target_ddrr = drr(rot_gt, xyz_gt, parameterization="euler_angles", convention="ZXY")
 
         perturb_rad = float(PERTURB_DEG * np.pi / 180.0)
         rot_opt = torch.tensor([[perturb_rad, 0.0, 0.0]], device=device, requires_grad=True)
-        xyz_opt = torch.tensor([[0.0, 850.0, 0.0]],       device=device, requires_grad=True)
+        xyz_opt = torch.tensor([[
+            DEFAULT_GEOMETRY.sad * DEFAULT_GEOMETRY.view_dir_x,
+            DEFAULT_GEOMETRY.sad * DEFAULT_GEOMETRY.view_dir_y,
+            DEFAULT_GEOMETRY.sad * DEFAULT_GEOMETRY.view_dir_z,
+        ]], device=device, requires_grad=True)
 
         optimizer      = torch.optim.Adam([rot_opt, xyz_opt], lr=LR)
         losses_ddrr    = []
