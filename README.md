@@ -12,7 +12,7 @@ This suite natively wraps and strictly aligns the following rendering engines:
 2. **Monte Carlo (Ground Truth - Physical):** CPU-based polychromatic simulation including scatter effects.
 3. **DiffDRR (Siddon & Trilinear):** Highly optimized, fully differentiable GPU ray-casting.
 4. **DVR (PyTorch3D):** Differentiable Volume Rendering via PyTorch3D emission-absorption ray-marching.
-5. **DeepDRR (Optional):** GPU physics renderer with deep-learning scatter estimation validated against Monte Carlo.
+5. **DeepDRR:** GPU physics renderer with deep-learning scatter estimation validated against Monte Carlo.
 
 ## 📋 Prerequisites
 
@@ -36,9 +36,9 @@ source .venv/bin/activate
 ```
 
 ### 2. Install PyTorch & PyTorch3D
-Install PyTorch with your respective CUDA version (e.g., CUDA 11.8) using `uv`:
+Install PyTorch with your respective CUDA version (e.g., CUDA 12.8) using `uv`:
 ```bash
-uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
 
 Install **PyTorch3D** (required for the DVR engine):
@@ -60,7 +60,7 @@ You must have [Plastimatch](https://plastimatch.org/) installed and available in
 - **Ubuntu/Debian:** `sudo apt-get install plastimatch`
 - **Windows:** Download the installer from the Plastimatch website and add it to your environment variables.
 
-### 5. Install DeepDRR (Optional)
+### 5. Install DeepDRR
 DeepDRR provides physical accuracy with neural scatter estimation. It is officially supported only on Linux with CUDA.
 ```bash
 # For CUDA 11.x:
@@ -68,6 +68,9 @@ uv pip install deepdrr[cuda11x]
 
 # For CUDA 12.x:
 uv pip install deepdrr[cuda12x]
+
+# For CUDA 12.8:
+uv pip install deepdrr[cuda128]
 ```
 
 ## 🧪 Usage
