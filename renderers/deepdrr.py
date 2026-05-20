@@ -92,7 +92,7 @@ def generate_deepdrr_drr(
             hu_values=hu_values,
             origin=origin,
             spacing=spacing,
-            anatomical_coordinate_system="LPS",
+            anatomical_coordinate_system="RAS",
             use_thresholding=True,
         )
 
@@ -129,7 +129,7 @@ def generate_deepdrr_drr(
         with deepdrr.Projector(
             ct_volume,
             device  = dd_device,
-            neglog  = False,    # return transmission (same polarity as Plastimatch / MC)
+            neglog  = True,     # return attenuation (-log T): air=dark, bone=bright
         ) as projector:
             image_np = projector()  # (H, W) float32
 
