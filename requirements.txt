@@ -4,6 +4,7 @@ torchvision
 torchio
 pytorch3d
 diffdrr
+numba
 numpy
 scipy
 matplotlib

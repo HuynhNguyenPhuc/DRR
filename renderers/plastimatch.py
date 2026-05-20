@@ -58,7 +58,10 @@ def generate_plastimatch_drr(
         out_prefix = os.path.join(tmpdir, "drr")
 
         # 4. Save CT volume
-        image = sitk.GetImageFromArray(vol_np)
+        # Plastimatch's DRR lookup table expects Hounsfield Units (HU).
+        # Convert normalised density [0, 1] → HU: 0 = -1000 (air), 1 = +3000 (bone).
+        hu_np = (vol_np * 4_000.0 - 1_000.0).astype(np.float32)
+        image = sitk.GetImageFromArray(hu_np)
         image.SetSpacing([voxel_spacing, voxel_spacing, voxel_spacing])
         # Center the volume at the world origin so the isocenter (0,0,0) passes
         # through the volume midpoint — matching DVR, DiffDRR, and MC renderers.

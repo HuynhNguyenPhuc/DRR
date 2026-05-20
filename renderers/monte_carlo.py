@@ -205,7 +205,10 @@ def _march_primary(
 
         density = vol_np[ix, iy, iz] * inside          # (H, W)
 
-        mu_eff  = density * mu_bone_e + (1.0 - density) * mu_tissue_e
+        # density=0 → air (μ=0); density=1 → bone (μ=μ_bone).
+        # Multiplying by density ensures air voxels contribute zero attenuation,
+        # preventing the black-image artifact caused by tissue μ applied to air.
+        mu_eff  = density * (density * mu_bone_e + (1.0 - density) * mu_tissue_e)
         line_integral += mu_eff
 
     line_integral *= step_mm
