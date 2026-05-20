@@ -147,5 +147,5 @@ def make_diffdrr_subject(volume_tensor: torch.Tensor, voxel_spacing: float = 2.0
     )
     dens_4d    = volume_tensor.squeeze(0)
     scalar_img = torchio.ScalarImage(tensor=dens_4d.cpu().numpy(), affine=affine)
-    sub        = torchio.Subject(density=scalar_img)
+    sub        = torchio.Subject(volume=scalar_img)
     return canonicalize(sub)
