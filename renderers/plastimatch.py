@@ -61,11 +61,13 @@ def generate_plastimatch_drr(
         # Plastimatch's DRR lookup table expects Hounsfield Units (HU).
         # Convert normalised density [0, 1] → HU: 0 = -1000 (air), 1 = +3000 (bone).
         hu_np = (vol_np * 4_000.0 - 1_000.0).astype(np.float32)
+        # vol_np is (X, Y, Z). SimpleITK GetImageFromArray expects (Z, Y, X) order for 3D numpy arrays.
+        hu_np = np.transpose(hu_np, (2, 1, 0))
         image = sitk.GetImageFromArray(hu_np)
         image.SetSpacing([voxel_spacing, voxel_spacing, voxel_spacing])
         # Center the volume at the world origin so the isocenter (0,0,0) passes
         # through the volume midpoint — matching DVR, DiffDRR, and MC renderers.
-        # SimpleITK uses (x, y, z) order; vol_np axes are (D, H, W) = (z, y, x).
+        # vol_np axes are (X, Y, Z), so shape[0] is X dimension.
         half = float(vol_np.shape[0]) * voxel_spacing / 2.0
         image.SetOrigin([-half, -half, -half])
         sitk.WriteImage(image, in_path)
@@ -85,7 +87,7 @@ def generate_plastimatch_drr(
             "-o", f"{geo.isocenter_x} {geo.isocenter_y} {geo.isocenter_z}", # Isocenter
             "--sid", str(geo.sdd),
             "--sad", str(geo.sad),
-            "-n", f"{-geo.view_dir_x} {-geo.view_dir_y} {-geo.view_dir_z}", # Detector normal
+            "-nrm", f"{-geo.view_dir_x} {-geo.view_dir_y} {-geo.view_dir_z}", # Detector normal
             "--vup", f"{geo.up_vec_x} {geo.up_vec_y} {geo.up_vec_z}",       # Up vector
         ]
 

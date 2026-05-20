@@ -123,8 +123,10 @@ def _build_detector_pixels(
     j_idx = np.arange(image_size, dtype=np.float64)
     ii, jj = np.meshgrid(i_idx, j_idx, indexing="ij")  # (H, W)
 
-    dx = (ii - (image_size - 1) / 2.0) * pixel_size   # along right
-    dy = (jj - (image_size - 1) / 2.0) * pixel_size   # along up
+    # `ii` is row index (y in image, going down). We want row to map to physical -up.
+    # `jj` is col index (x in image, going right). We want col to map to physical right.
+    dx = (jj - (image_size - 1) / 2.0) * pixel_size   # along right
+    dy = - (ii - (image_size - 1) / 2.0) * pixel_size # along up (negative because rows go down)
 
     pixel_pos = (
         detector_center[None, None, :]

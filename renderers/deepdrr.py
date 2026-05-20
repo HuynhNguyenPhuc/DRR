@@ -108,11 +108,12 @@ def generate_deepdrr_drr(
         )
 
         # View direction and up-vector in world coordinates.
-        # DeepDRR's world = anatomical (LPS) which we align with our world.
-        view_dir_world = ct_volume.world_from_anatomical @ ddgeo.vector(
+        # We aligned the volume's center with the world origin (0,0,0).
+        # So our geo view and up vectors are directly in DeepDRR's world space.
+        view_dir_world = ddgeo.vector(
             geo.view_dir_x, geo.view_dir_y, geo.view_dir_z,
         )
-        up_vec_world = ct_volume.world_from_anatomical @ ddgeo.vector(
+        up_vec_world = ddgeo.vector(
             geo.up_vec_x, geo.up_vec_y, geo.up_vec_z,
         )
 

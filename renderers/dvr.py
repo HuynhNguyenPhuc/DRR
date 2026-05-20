@@ -228,6 +228,11 @@ class BaseXRayVolumeRenderer(nn.Module):
             if opacity is not None
             else torch.ones_like(volume[:, [0]]) * scaling_factor
         )
+        
+        # PyTorch3D grid_sample maps the last dimension (W) to X, middle (H) to Y, first (D) to Z.
+        # Our volume is (X, Y, Z), so we must transpose X and Z to pass to PyTorch3D as (Z, Y, X).
+        features = features.permute(0, 1, 4, 3, 2)
+        densities = densities.permute(0, 1, 4, 3, 2)
 
         shape   = max(features.shape[2], features.shape[3])
         volumes = Volumes(

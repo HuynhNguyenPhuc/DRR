@@ -90,7 +90,7 @@ def load_ct_volume(ct_path: str | None = None, target_size: int = 128):
         volume_tensor = vol.unsqueeze(0).unsqueeze(0)
 
     # ── Final Processing: Resample & Clamp ───────────────────────────────────
-    if volume_tensor.shape[2] != target_size:
+    if volume_tensor.shape[2] != target_size or volume_tensor.shape[3] != target_size or volume_tensor.shape[4] != target_size:
         logger.info("[DATA] Resampling to %d³ ...", target_size)
         volume_tensor = F.interpolate(
             volume_tensor,
@@ -98,6 +98,7 @@ def load_ct_volume(ct_path: str | None = None, target_size: int = 128):
             mode="trilinear",
             align_corners=False,
         )
+        subject = None  # Force recreation with the new tensor and spacing
 
     # Clamp the values to [0, 1] range to avoid physically impossible densities
     volume_tensor = volume_tensor.clamp(0.0, 1.0)
