@@ -54,7 +54,8 @@ def generate_plastimatch_drr(
     # 3. Create temporary directory
     with tempfile.TemporaryDirectory() as tmpdir:
         in_path = os.path.join(tmpdir, "ct.mha")
-        out_prefix = os.path.join(tmpdir, "drr.mha")  # Force mha format
+        # Plastimatch appends "0000.pfm" to this prefix -> drr0000.pfm
+        out_prefix = os.path.join(tmpdir, "drr")
 
         # 4. Save CT volume
         image = sitk.GetImageFromArray(vol_np)
@@ -69,13 +70,13 @@ def generate_plastimatch_drr(
         # 5. Build plastimatch command
         geo = geometry or DEFAULT_GEOMETRY
         fov = vol_np.shape[0] * voxel_spacing
-        delx = fov / image_size
 
         cmd = [
             "plastimatch", "drr",
-            "-i", "exact",           # Exact raytracing for Ground Truth
+            "-i", "exact",           # Exact raytracing algorithm
+            "-t", "pfm",             # 32-bit float Portable FloatMap output
             "-I", in_path,
-            "-O", out_prefix,
+            "-O", out_prefix,        # Prefix only, no extension
             "-r", f"{image_size} {image_size}",
             "-z", f"{fov} {fov}",
             "-o", f"{geo.isocenter_x} {geo.isocenter_y} {geo.isocenter_z}", # Isocenter
@@ -92,25 +93,30 @@ def generate_plastimatch_drr(
             logger.error("[Plastimatch] Command failed:\n%s", exc.stderr)
             raise RuntimeError(f"Plastimatch command failed:\n{exc.stderr}") from exc
 
-        # 7. Load DRR image
+        # 7. Load DRR image — Plastimatch outputs drr0000.pfm
         import glob
-        generated_files = glob.glob(out_prefix + "*")
+        generated_files = sorted(glob.glob(out_prefix + "*.pfm"))
         if not generated_files:
             logger.error("[Plastimatch] Output file was not generated.")
-            raise FileNotFoundError("Plastimatch output file was not generated.")
-        
-        # Plastimatch appends 0000.ext to the output prefix
+            raise FileNotFoundError("Plastimatch output .pfm file was not generated.")
+
         out_path = generated_files[0]
-        drr_img = sitk.ReadImage(out_path)
-        drr_np = sitk.GetArrayFromImage(drr_img)  # (1, H, W) or (H, W)
-        
-        if drr_np.ndim == 2:
-            drr_np = drr_np[np.newaxis, np.newaxis, ...]
-        elif drr_np.ndim == 3:
-            drr_np = drr_np[np.newaxis, ...]
+
+        # Read PFM (Portable FloatMap) manually — SimpleITK does not support pfm
+        with open(out_path, "rb") as f:
+            header = f.readline().decode().strip()   # "PF" (color) or "Pf" (grayscale)
+            dims = f.readline().decode().strip()
+            scale = float(f.readline().decode().strip())
+            cols, rows = map(int, dims.split())
+            drr_np = np.frombuffer(f.read(), dtype=np.float32).copy()
+            drr_np = drr_np.reshape((rows, cols))
+            if scale < 0:  # little-endian, flip vertically
+                drr_np = np.flipud(drr_np)
+
+        drr_np = drr_np[np.newaxis, np.newaxis, ...]  # (1, 1, H, W)
 
         # Normalize to [0, 1] for comparison
-        drr_np = (drr_np - np.min(drr_np)) / (np.max(drr_np) - np.min(drr_np) + 1e-8)
-        
+        drr_np = (drr_np - drr_np.min()) / (drr_np.max() - drr_np.min() + 1e-8)
+
         drr_tensor = torch.from_numpy(drr_np).float().to(device)
         return drr_tensor
