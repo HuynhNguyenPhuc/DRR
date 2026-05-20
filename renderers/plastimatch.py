@@ -87,7 +87,7 @@ def generate_plastimatch_drr(
             "-o", f"{geo.isocenter_x} {geo.isocenter_y} {geo.isocenter_z}", # Isocenter
             "--sid", str(geo.sdd),
             "--sad", str(geo.sad),
-            "-nrm", f"{-geo.view_dir_x} {-geo.view_dir_y} {-geo.view_dir_z}", # Detector normal
+            "-n", f"{-geo.view_dir_x} {-geo.view_dir_y} {-geo.view_dir_z}", # Detector normal
             "--vup", f"{geo.up_vec_x} {geo.up_vec_y} {geo.up_vec_z}",       # Up vector
         ]
 
