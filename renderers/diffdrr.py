@@ -60,6 +60,18 @@ def build_diffdrr_renderer(
         delx   = delx,
     ).to(device)
 
+    # Wrap the DiffDRR object to fix the horizontal flip mismatch
+    class DRRWrapper(torch.nn.Module):
+        def __init__(self, drr_module):
+            super().__init__()
+            self.drr_module = drr_module
+
+        def forward(self, *args, **kwargs):
+            img = self.drr_module(*args, **kwargs)
+            return torch.flip(img, dims=[-1])
+
+    drr_wrapper = DRRWrapper(drr)
+
     # Initial rotation and translation estimates
     # DiffDRR places the source at origin and moves the volume.
     # To match S -> I direction, the volume (at isocenter I) is placed at `SAD * view_dir`.
@@ -70,4 +82,4 @@ def build_diffdrr_renderer(
         geo.sad * geo.view_dir_z
     ]], device=device)
 
-    return drr, rot, xyz
+    return drr_wrapper, rot, xyz

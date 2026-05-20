@@ -262,6 +262,7 @@ def run_quality(volume_tensor, subject, n_pts, ct_size, voxel_spacing, device, o
         ).to(device)
         with torch.no_grad():
             img_trilinear = drr_tri(rot, xyz, parameterization="euler_angles", convention="ZXY")
+            img_trilinear = torch.flip(img_trilinear, dims=[-1])
         images["diffdrr_trilinear"] = img_trilinear
         logger.info("    DiffDRR (Trilinear) rendered: shape %s", tuple(img_trilinear.shape))
     except Exception as exc:
@@ -448,6 +449,7 @@ def run_optimization(volume_tensor, subject, n_pts, ct_size, voxel_spacing, opt_
         ]], device=device)
         with torch.no_grad():
             target_ddrr = drr(rot_gt, xyz_gt, parameterization="euler_angles", convention="ZXY")
+            target_ddrr = torch.flip(target_ddrr, dims=[-1])
 
         perturb_rad = float(PERTURB_DEG * np.pi / 180.0)
         rot_opt = torch.tensor([[perturb_rad, 0.0, 0.0]], device=device, requires_grad=True)
@@ -465,6 +467,7 @@ def run_optimization(volume_tensor, subject, n_pts, ct_size, voxel_spacing, opt_
         for it in range(opt_iters):
             optimizer.zero_grad()
             img_cur  = drr(rot_opt, xyz_opt, parameterization="euler_angles", convention="ZXY")
+            img_cur  = torch.flip(img_cur, dims=[-1])
             loss     = zncc_loss(img_cur, target_ddrr.detach())
             loss.backward()
             optimizer.step()

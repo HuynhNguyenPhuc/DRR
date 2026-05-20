@@ -85,15 +85,12 @@ def generate_deepdrr_drr(
         half_mm = D * voxel_spacing / 2.0
         spacing = (float(voxel_spacing),) * 3
 
-        # Convert volume from RAS (axis 0 = Right, axis 1 = Anterior, axis 2 = Superior)
-        # to LPS (axis 0 = Left, axis 1 = Posterior, axis 2 = Superior), which is the
-        # only convention accepted by deepdrr.Volume.from_hu().
-        # Flip axis 0 (Right→Left) and axis 1 (Anterior→Posterior); axis 2 is unchanged.
-        hu_lps = np.ascontiguousarray(hu_values[::-1, ::-1, :])
-        # Voxel (0,0,0) of hu_lps was original voxel (D-1, H-1, 0).
-        # Its LPS coordinates: X = -(half_mm - sp), Y = -(half_mm - sp), Z = -half_mm
-        first_center = -(half_mm - float(voxel_spacing))
-        origin = ddgeo.point(first_center, first_center, -half_mm)
+        # Convert volume from (X, Y, Z) to (Z, Y, X) for SimpleITK
+        hu_z_y_x = np.transpose(hu_values, (2, 1, 0))
+        hu_lps = np.ascontiguousarray(hu_z_y_x)
+        
+        # Center the volume at the world origin
+        origin = ddgeo.point(-half_mm, -half_mm, -half_mm)
 
         logger.debug("[DeepDRR] Segmenting materials (use_thresholding=True) ...")
         ct_volume = deepdrr.Volume.from_hu(

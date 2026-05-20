@@ -114,8 +114,13 @@ def generate_plastimatch_drr(
             cols, rows = map(int, dims.split())
             drr_np = np.frombuffer(f.read(), dtype=np.float32).copy()
             drr_np = drr_np.reshape((rows, cols))
-            if scale < 0:  # little-endian, flip vertically
-                drr_np = np.flipud(drr_np)
+            if scale > 0:  # big-endian
+                drr_np = drr_np.byteswap()
+            
+            # Plastimatch's horizontal axis (normal x vup) points in -X direction.
+            # We must flip left-right to match the standard +X right direction.
+            # ITK writes PFM top-to-bottom natively, so no vertical flip is needed.
+            drr_np = np.fliplr(drr_np)
 
         drr_np = drr_np[np.newaxis, np.newaxis, ...]  # (1, 1, H, W)
 
