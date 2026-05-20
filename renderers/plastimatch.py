@@ -75,13 +75,6 @@ def generate_plastimatch_drr(
         # 5. Build plastimatch command
         geo = geometry or DEFAULT_GEOMETRY
         fov = vol_np.shape[0] * voxel_spacing
-        # DiffDRR treats `delx` as the pixel pitch at the *isocenter* plane,
-        # not at the physical detector.  The physical detector that produces
-        # the same isocenter FOV as DiffDRR must therefore be magnified by
-        # SDD/SAD (= 1020/850 ≈ 1.2).  Scaling Plastimatch's detector size
-        # by the same factor aligns the two renderers' fields of view.
-        detector_size = fov * geo.sdd / geo.sad
-
         cmd = [
             "plastimatch", "drr",
             "-i", "exact",           # Exact raytracing algorithm
@@ -89,7 +82,7 @@ def generate_plastimatch_drr(
             "-I", in_path,
             "-O", out_prefix,        # Prefix only, no extension
             "-r", f"{image_size} {image_size}",
-            "-z", f"{detector_size:.2f} {detector_size:.2f}",
+            "-z", f"{fov:.2f} {fov:.2f}",
             "-o", f"{geo.isocenter_x} {geo.isocenter_y} {geo.isocenter_z}", # Isocenter
             "--sid", str(geo.sdd),
             "--sad", str(geo.sad),

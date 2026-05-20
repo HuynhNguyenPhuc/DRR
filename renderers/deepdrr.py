@@ -82,17 +82,25 @@ def generate_deepdrr_drr(
         # 2. Build DeepDRR volume from HU
         hu_values = _density_to_hu(volume_tensor)  # (D, H, W)
 
-        # Centre the volume at the world origin, matching other renderers.
         half_mm = D * voxel_spacing / 2.0
-        origin  = ddgeo.point(-half_mm, -half_mm, -half_mm)
         spacing = (float(voxel_spacing),) * 3
+
+        # Convert volume from RAS (axis 0 = Right, axis 1 = Anterior, axis 2 = Superior)
+        # to LPS (axis 0 = Left, axis 1 = Posterior, axis 2 = Superior), which is the
+        # only convention accepted by deepdrr.Volume.from_hu().
+        # Flip axis 0 (Right→Left) and axis 1 (Anterior→Posterior); axis 2 is unchanged.
+        hu_lps = np.ascontiguousarray(hu_values[::-1, ::-1, :])
+        # Voxel (0,0,0) of hu_lps was original voxel (D-1, H-1, 0).
+        # Its LPS coordinates: X = -(half_mm - sp), Y = -(half_mm - sp), Z = -half_mm
+        first_center = -(half_mm - float(voxel_spacing))
+        origin = ddgeo.point(first_center, first_center, -half_mm)
 
         logger.debug("[DeepDRR] Segmenting materials (use_thresholding=True) ...")
         ct_volume = deepdrr.Volume.from_hu(
-            hu_values=hu_values,
+            hu_values=hu_lps,
             origin=origin,
             spacing=spacing,
-            anatomical_coordinate_system="RAS",
+            anatomical_coordinate_system="LPS",
             use_thresholding=True,
         )
 

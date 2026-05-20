@@ -313,7 +313,10 @@ def generate_mc_drr(
         sigma=scatter_sigma_px,
     )
     image = primary + scatter_kernel
-    image = np.clip(image, 0.0, None)
+    # Convert transmission → attenuation: -log(T) so that bone=bright, air=dark,
+    # matching the polarity of DiffDRR and Plastimatch.
+    image = np.clip(image, 1e-6, 1.0)           # avoid log(0) and log(>1)
+    image = -np.log(image).astype(np.float32)   # attenuation integral (≥ 0)
 
     # 4. Optional Poisson quantum noise
     if add_quantum_noise:
