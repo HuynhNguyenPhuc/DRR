@@ -145,8 +145,12 @@ def make_diffdrr_subject(volume_tensor: torch.Tensor, voxel_spacing: float = 2.0
          [0,  0,  0,  1.0   ]],
         dtype=np.float64,
     )
-    dens_4d    = volume_tensor.squeeze(0)
-    scalar_img = torchio.ScalarImage(tensor=dens_4d.cpu().numpy(), affine=affine)
+    dens_4d     = volume_tensor.squeeze(0)
+    img_np      = dens_4d.cpu().numpy()
+    scalar_img  = torchio.ScalarImage(tensor=img_np, affine=affine)
+    # DRR.__init__ reads subject.density.data; for our phantom the volume is
+    # already normalised [0,1] so density == volume.
+    density_img = torchio.ScalarImage(tensor=img_np, affine=affine)
 
     # AP reorient matrix — same 4×4 produced by DiffDRR's read(orientation="AP").
     # Rotates the C-arm about the x-axis by 90° so the detector faces the AP direction.
@@ -158,11 +162,14 @@ def make_diffdrr_subject(volume_tensor: torch.Tensor, voxel_spacing: float = 2.0
         dtype=torch.float32,
     )
 
-    # TorchIO's Subject only stores torchio.Image instances in its OrderedDict.
-    # Non-Image values (tensors, None) passed as kwargs are silently dropped, so
-    # they must be set as regular Python object attributes after construction so
-    # that __getattribute__ can find them before __getattr__ checks the dict.
-    sub = torchio.Subject(volume=scalar_img)
-    sub.fiducials = None     # required by canonicalize()
-    sub.reorient  = reorient # required by DRR.__init__ -> Detector
+    # TorchIO Subject may silently drop non-Image kwargs (None, plain tensors,
+    # strings) depending on the installed version.  Create the Subject with
+    # only the two Image entries that are unconditionally stored, then attach
+    # every non-Image attribute directly to the instance so that Python's
+    # __getattribute__ (which checks instance.__dict__ first) finds them
+    # before __getattr__ ever looks inside the dict.
+    sub = torchio.Subject(volume=scalar_img, density=density_img)
+    sub.mask      = None     # DRR.__init__: `if subject.mask is not None`
+    sub.fiducials = None     # canonicalize(): `if subject.fiducials is not None`
+    sub.reorient  = reorient # DRR.__init__: passed to Detector
     return canonicalize(sub)
