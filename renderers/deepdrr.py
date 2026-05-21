@@ -123,8 +123,18 @@ def generate_deepdrr_drr(
             geo.up_vec_x, geo.up_vec_y, geo.up_vec_z,
         )
 
+        # We must add the config isocenter offset to the volume's physical center in world
+        cx = float(ct_volume.center_in_world[0])
+        cy = float(ct_volume.center_in_world[1])
+        cz = float(ct_volume.center_in_world[2])
+        isocenter = ddgeo.point(
+            cx + geo.isocenter_x, 
+            cy + geo.isocenter_y, 
+            cz + geo.isocenter_z
+        )
+
         dd_device.set_view(
-            point                  = ddgeo.point(geo.isocenter_x, geo.isocenter_y, geo.isocenter_z),
+            point                  = isocenter,
             direction              = view_dir_world,
             up                     = up_vec_world,
             source_to_point_fraction = geo.sad / geo.sdd,

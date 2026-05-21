@@ -226,7 +226,7 @@ class BaseXRayVolumeRenderer(nn.Module):
         densities = (
             opacity * scaling_factor
             if opacity is not None
-            else torch.ones_like(volume[:, [0]]) * scaling_factor
+            else volume[:, [0]] * scaling_factor
         )
         
         # PyTorch3D grid_sample maps the last dimension (W) to X, middle (H) to Y, first (D) to Z.

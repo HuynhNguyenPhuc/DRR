@@ -73,13 +73,40 @@ def build_diffdrr_renderer(
     drr_wrapper = DRRWrapper(drr)
 
     # Initial rotation and translation estimates
-    # DiffDRR places the source at origin and moves the volume.
-    # To match S -> I direction, the volume (at isocenter I) is placed at `SAD * view_dir`.
-    rot = torch.tensor([[0.0, 0.0, 0.0]], device=device)
-    xyz = torch.tensor([[
-        geo.sad * geo.view_dir_x - geo.isocenter_x,
-        geo.sad * geo.view_dir_y - geo.isocenter_y,
-        geo.sad * geo.view_dir_z - geo.isocenter_z
-    ]], device=device)
+    # DiffDRR places the source at origin and the camera looks along +Y.
+    # To support arbitrary view_dir and up_vec, we compute the rotation R_cw
+    # from World to DiffDRR Camera space, and the translation T_c.
+    import numpy as np
+    
+    d = np.array([geo.view_dir_x, geo.view_dir_y, geo.view_dir_z], dtype=np.float32)
+    d = d / np.linalg.norm(d)
+    
+    u = np.array([geo.up_vec_x, geo.up_vec_y, geo.up_vec_z], dtype=np.float32)
+    u = u / np.linalg.norm(u)
+    
+    r = np.cross(d, u)
+    r = r / np.linalg.norm(r)
+    
+    # Re-orthogonalize u
+    u = np.cross(r, d)
+    u = u / np.linalg.norm(u)
+    
+    # R_cw maps from World to DiffDRR Camera Space (where d maps to +Y, u to +Z)
+    R_cw_np = np.stack([r, d, u], axis=0)
+    R_cw = torch.from_numpy(R_cw_np).to(device)
+    
+    try:
+        from pytorch3d.transforms import matrix_to_euler_angles
+        rot = matrix_to_euler_angles(R_cw, "ZXY").unsqueeze(0)
+    except ImportError:
+        logger.warning("[DiffDRR] pytorch3d not available for matrix_to_euler_angles, falling back to identity rotation.")
+        rot = torch.tensor([[0.0, 0.0, 0.0]], device=device)
+
+    # Compute T_c: we want World isocenter I_w to map to Camera isocenter [0, SAD, 0]
+    I_w = torch.tensor([geo.isocenter_x, geo.isocenter_y, geo.isocenter_z], device=device, dtype=torch.float32)
+    I_c = torch.tensor([0.0, geo.sad, 0.0], device=device, dtype=torch.float32)
+    
+    T_c = I_c - torch.matmul(R_cw, I_w)
+    xyz = T_c.unsqueeze(0)
 
     return drr_wrapper, rot, xyz

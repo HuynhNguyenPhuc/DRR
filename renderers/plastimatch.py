@@ -112,14 +112,13 @@ def generate_plastimatch_drr(
             dims = f.readline().decode().strip()
             scale = float(f.readline().decode().strip())
             cols, rows = map(int, dims.split())
-            drr_np = np.frombuffer(f.read(), dtype=np.float32).copy()
-            drr_np = drr_np.reshape((rows, cols))
-            if scale < 0:  # little-endian, flip vertically
-                drr_np = np.flipud(drr_np)
             
-            # Plastimatch's horizontal axis (normal x vup) points in -X direction.
-            # To match Monte Carlo and DVR, we must flip left-right.
-            drr_np = np.fliplr(drr_np)
+            endian = '<' if scale < 0 else '>'
+            drr_np = np.frombuffer(f.read(), dtype=f"{endian}f4").copy()
+            drr_np = drr_np.reshape((rows, cols))
+            
+            # Plastimatch's coordinate system (u = vup x n) exactly matches 
+            # our Monte Carlo setup (right = view x up). No flipping required.
 
         drr_np = drr_np[np.newaxis, np.newaxis, ...]  # (1, 1, H, W)
 
