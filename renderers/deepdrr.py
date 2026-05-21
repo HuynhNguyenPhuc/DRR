@@ -85,9 +85,8 @@ def generate_deepdrr_drr(
         half_mm = D * voxel_spacing / 2.0
         spacing = (float(voxel_spacing),) * 3
 
-        # Convert volume from (X, Y, Z) to (Z, Y, X) for SimpleITK
-        hu_z_y_x = np.transpose(hu_values, (2, 1, 0))
-        hu_lps = np.ascontiguousarray(hu_z_y_x)
+        # Use original (X, Y, Z) order without transposing or flipping
+        hu_lps = np.ascontiguousarray(hu_values)
         
         # Center the volume at the world origin
         origin = ddgeo.point(-half_mm, -half_mm, -half_mm)
