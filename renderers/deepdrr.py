@@ -87,7 +87,7 @@ def generate_deepdrr_drr(
 
         # DeepDRR internally uses SimpleITK, which strictly expects 3D numpy arrays 
         # in (Z, Y, X) dimension order. If we pass (X, Y, Z), it swaps the axes and 
-        # rotates the volume 90 degrees. We must transpose it here.
+        # rotates the volume. We must transpose it here.
         hu_itk = np.ascontiguousarray(np.transpose(hu_values, (2, 1, 0)))
         
         # Center the volume at the world origin

@@ -97,7 +97,8 @@ def build_diffdrr_renderer(
     
     try:
         from pytorch3d.transforms import matrix_to_euler_angles
-        rot = matrix_to_euler_angles(R_cw, "ZXY").unsqueeze(0)
+        # DiffDRR uses PyTorch3D transforms (P @ R + T), so we must pass the transpose of R_cw
+        rot = matrix_to_euler_angles(R_cw.T, "ZXY").unsqueeze(0)
     except ImportError:
         logger.warning("[DiffDRR] pytorch3d not available for matrix_to_euler_angles, falling back to identity rotation.")
         rot = torch.tensor([[0.0, 0.0, 0.0]], device=device)
