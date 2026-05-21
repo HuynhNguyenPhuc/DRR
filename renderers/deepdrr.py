@@ -124,7 +124,7 @@ def generate_deepdrr_drr(
         )
 
         dd_device.set_view(
-            point                  = ct_volume.center_in_world,
+            point                  = ddgeo.point(geo.isocenter_x, geo.isocenter_y, geo.isocenter_z),
             direction              = view_dir_world,
             up                     = up_vec_world,
             source_to_point_fraction = geo.sad / geo.sdd,
@@ -150,6 +150,10 @@ def generate_deepdrr_drr(
             .unsqueeze(0)
             .to(device)
         )
+        
+        # Flip horizontally to match Monte Carlo, DVR, and DiffDRR
+        drr_tensor = torch.flip(drr_tensor, dims=[-1])
+        
         return drr_tensor
 
     except Exception as exc:

@@ -77,9 +77,9 @@ def build_diffdrr_renderer(
     # To match S -> I direction, the volume (at isocenter I) is placed at `SAD * view_dir`.
     rot = torch.tensor([[0.0, 0.0, 0.0]], device=device)
     xyz = torch.tensor([[
-        geo.sad * geo.view_dir_x,
-        geo.sad * geo.view_dir_y,
-        geo.sad * geo.view_dir_z
+        geo.sad * geo.view_dir_x - geo.isocenter_x,
+        geo.sad * geo.view_dir_y - geo.isocenter_y,
+        geo.sad * geo.view_dir_z - geo.isocenter_z
     ]], device=device)
 
     return drr_wrapper, rot, xyz

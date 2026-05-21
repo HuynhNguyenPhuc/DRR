@@ -394,13 +394,14 @@ def build_dvr_renderer(image_size: int, n_pts: int, ct_size: int, voxel_spacing:
     x_cam = x_cam / np.linalg.norm(x_cam)
     y_cam = np.cross(z_cam, x_cam)
 
-    R_np = np.stack([x_cam, y_cam, z_cam], axis=0)
+    R_np = np.stack([x_cam, y_cam, z_cam], axis=1)
     R = torch.from_numpy(R_np).to(device)
 
     # 5. Source translation
     # Source S = I - SAD * d. In world NDC, SAD becomes sad_ndc
-    S = -sad_ndc * d
-    T_np = -R_np @ S
+    I_ndc = np.array([geo.isocenter_x, geo.isocenter_y, geo.isocenter_z], dtype=np.float32) * (2.0 / L)
+    S = I_ndc - sad_ndc * d
+    T_np = -S @ R_np
     T = torch.from_numpy(T_np).unsqueeze(0).to(device)
 
     cameras = PerspectiveCameras(
