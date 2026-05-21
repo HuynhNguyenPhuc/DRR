@@ -85,15 +85,17 @@ def generate_deepdrr_drr(
         half_mm = D * voxel_spacing / 2.0
         spacing = (float(voxel_spacing),) * 3
 
-        # Use original (X, Y, Z) order without transposing or flipping
-        hu_lps = np.ascontiguousarray(hu_values)
+        # DeepDRR internally uses SimpleITK, which strictly expects 3D numpy arrays 
+        # in (Z, Y, X) dimension order. If we pass (X, Y, Z), it swaps the axes and 
+        # rotates the volume 90 degrees. We must transpose it here.
+        hu_itk = np.ascontiguousarray(np.transpose(hu_values, (2, 1, 0)))
         
         # Center the volume at the world origin
         origin = ddgeo.point(-half_mm, -half_mm, -half_mm)
 
         logger.debug("[DeepDRR] Segmenting materials (use_thresholding=True) ...")
         ct_volume = deepdrr.Volume.from_hu(
-            hu_values=hu_lps,
+            hu_values=hu_itk,
             origin=origin,
             spacing=spacing,
             anatomical_coordinate_system="LPS",

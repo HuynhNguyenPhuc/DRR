@@ -39,13 +39,13 @@ def generate_plastimatch_drr(
         subprocess.run(["plastimatch", "--version"], capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         logger.error("[Plastimatch] Executable not found in PATH.")
-        raise RuntimeError("Plastimatch executable not found in PATH. It is strictly required for Ground Truth.") from exc
+        return None
 
     try:
         import SimpleITK as sitk
     except ImportError as exc:
         logger.error("[Plastimatch] SimpleITK is required but not installed.")
-        raise RuntimeError("SimpleITK is required but not installed. Run `pip install SimpleITK`.") from exc
+        return None
 
     # 2. Extract dimensions
     assert volume_tensor.dim() == 5, "Expected (1, 1, D, H, W)"
@@ -114,12 +114,11 @@ def generate_plastimatch_drr(
             cols, rows = map(int, dims.split())
             drr_np = np.frombuffer(f.read(), dtype=np.float32).copy()
             drr_np = drr_np.reshape((rows, cols))
-            if scale > 0:  # big-endian
-                drr_np = drr_np.byteswap()
+            if scale < 0:  # little-endian, flip vertically
+                drr_np = np.flipud(drr_np)
             
             # Plastimatch's horizontal axis (normal x vup) points in -X direction.
-            # We must flip left-right to match the standard +X right direction.
-            # ITK writes PFM top-to-bottom natively, so no vertical flip is needed.
+            # To match Monte Carlo and DVR, we must flip left-right.
             drr_np = np.fliplr(drr_np)
 
         drr_np = drr_np[np.newaxis, np.newaxis, ...]  # (1, 1, H, W)
