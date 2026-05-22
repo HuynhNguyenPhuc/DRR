@@ -85,16 +85,10 @@ def generate_deepdrr_drr(
         half_mm = D * voxel_spacing / 2.0
         spacing = (float(voxel_spacing),) * 3
 
-        # Our NIfTI volume is (X, Y, Z) = (Left, Posterior, Superior).
-        # When DeepDRR uses anatomical_coordinate_system="LPS", its internal transform 
-        # maps indices (i, j, k) to physical coordinates (x, y, z) as:
-        # x = i (Left), y = k (Posterior), z = -j (Superior).
-        # Therefore, DeepDRR expects the numpy array axes to be (Left, Inferior, Posterior).
-        # We transpose our (Left, Posterior, Superior) array to (Left, Superior, Posterior), 
-        # and flip the Superior axis to Inferior.
-        hu_itk = np.transpose(hu_values, (0, 2, 1))
-        hu_itk = np.flip(hu_itk, axis=1)
-        hu_itk = np.ascontiguousarray(hu_itk)
+        # DeepDRR internally uses SimpleITK, which strictly expects 3D numpy arrays 
+        # in (Z, Y, X) dimension order. If we pass (X, Y, Z), it swaps the axes and 
+        # rotates the volume 90 degrees. We must transpose it here.
+        hu_itk = np.ascontiguousarray(np.transpose(hu_values, (2, 1, 0)))
         
         # Center the volume at the world origin
         origin = ddgeo.point(-half_mm, -half_mm, -half_mm)
@@ -155,8 +149,9 @@ def generate_deepdrr_drr(
         ) as projector:
             image_np = projector()  # (W, H) float32
 
-        # Rotate to (H, W) and flip vertically if needed to match Plastimatch
-        image_np = np.flip(image_np.T, axis=0).copy()
+        # Rotate to (H, W) to match our image format. 
+        # Since the input volume is properly aligned, we simply transpose.
+        image_np = image_np.T.copy()
 
         # 5. Return physical attenuation
         # (Removed Normalization: We preserve the physical -log(T) integral values)
