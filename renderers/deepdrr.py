@@ -90,10 +90,13 @@ def generate_deepdrr_drr(
         # Dim 0 maps to X (Left)
         # Dim 1 maps to -Z (Inferior)
         # Dim 2 maps to Y (Posterior)
-        # Since our array is (X, Y, Z), we must transpose to (Y, Z, X) 
-        # to map them correctly, and flip Dim 1 (-Z) to match.
+        # Our array is (X, Y, Z) = (Right, Anterior, Superior).
+        # We must transpose to (Y, Z, X) and flip all three axes to map:
+        # Right -> -Left
+        # Anterior -> -Posterior
+        # Superior -> -Inferior (Wait, Superior is +Z, Inferior is -Z. So Superior is ALREADY -Inferior. But DeepDRR S=-j. So to get Superior we need small j. Z=max is Superior. So we must flip Z).
         hu_itk = np.transpose(hu_values, (1, 2, 0))
-        hu_itk = np.flip(hu_itk, axis=1)
+        hu_itk = np.flip(hu_itk, axis=(0, 1, 2))
         hu_itk = np.ascontiguousarray(hu_itk)
         
         # Center the volume at the world origin
