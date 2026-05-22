@@ -85,19 +85,10 @@ def generate_deepdrr_drr(
         half_mm = D * voxel_spacing / 2.0
         spacing = (float(voxel_spacing),) * 3
 
-        # DeepDRR's Volume.from_hu with anatomical_coordinate_system="LPS" 
-        # applies a hardcoded rotation matrix where:
-        # Dim 0 maps to X (Left)
-        # Dim 1 maps to -Z (Inferior)
-        # Dim 2 maps to Y (Posterior)
-        # Our array is (X, Y, Z) = (Right, Anterior, Superior).
-        # We must transpose to (Y, Z, X) and flip all three axes to map:
-        # Right -> -Left
-        # Anterior -> -Posterior
-        # Superior -> -Inferior (Wait, Superior is +Z, Inferior is -Z. So Superior is ALREADY -Inferior. But DeepDRR S=-j. So to get Superior we need small j. Z=max is Superior. So we must flip Z).
-        hu_itk = np.transpose(hu_values, (1, 2, 0))
-        hu_itk = np.flip(hu_itk, axis=(0, 1, 2))
-        hu_itk = np.ascontiguousarray(hu_itk)
+        # DeepDRR internally uses SimpleITK, which strictly expects 3D numpy arrays 
+        # in (Z, Y, X) dimension order. If we pass (X, Y, Z), it swaps the axes and 
+        # rotates the volume 90 degrees. We must transpose it here.
+        hu_itk = np.ascontiguousarray(np.transpose(hu_values, (2, 1, 0)))
         
         # Center the volume at the world origin
         origin = ddgeo.point(-half_mm, -half_mm, -half_mm)
@@ -160,8 +151,8 @@ def generate_deepdrr_drr(
 
         # DeepDRR's projector returns (W, H) where W corresponds to Camera X (Right->Left)
         # and H corresponds to Camera Y (Superior->Inferior).
-        # We simply transpose it to (H, W) for standard image row/col indexing. No flips needed!
-        image_np = image_np.T.copy()
+        # Transpose to (H, W) and flip the Y-axis so Superior is at the top.
+        image_np = np.flip(image_np.T, axis=0).copy()
 
         drr_tensor = (
             torch.from_numpy(image_np)
