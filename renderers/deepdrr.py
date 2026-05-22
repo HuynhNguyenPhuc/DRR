@@ -85,10 +85,16 @@ def generate_deepdrr_drr(
         half_mm = D * voxel_spacing / 2.0
         spacing = (float(voxel_spacing),) * 3
 
-        # DeepDRR internally uses SimpleITK, which strictly expects 3D numpy arrays 
-        # in (Z, Y, X) dimension order. If we pass (X, Y, Z), it swaps the axes and 
-        # rotates the volume 90 degrees. We must transpose it here.
-        hu_itk = np.ascontiguousarray(np.transpose(hu_values, (2, 1, 0)))
+        # DeepDRR's Volume.from_hu with anatomical_coordinate_system="LPS" 
+        # applies a hardcoded rotation matrix where:
+        # Dim 0 maps to X (Left)
+        # Dim 1 maps to -Z (Inferior)
+        # Dim 2 maps to Y (Posterior)
+        # Since our array is (X, Y, Z), we must transpose to (X, Z, Y) 
+        # and flip Dim 1 to match DeepDRR's expectations perfectly.
+        hu_itk = np.transpose(hu_values, (0, 2, 1))
+        hu_itk = np.flip(hu_itk, axis=1)
+        hu_itk = np.ascontiguousarray(hu_itk)
         
         # Center the volume at the world origin
         origin = ddgeo.point(-half_mm, -half_mm, -half_mm)
@@ -149,9 +155,10 @@ def generate_deepdrr_drr(
         ) as projector:
             image_np = projector()  # (W, H) float32
 
-        # The native image_np from DeepDRR is already in (H, W) format 
-        # and correctly oriented (Superior at Row 0, Patient Left at Col Max).
-        image_np = image_np.copy()
+        # DeepDRR's projector returns (W, H) where W corresponds to Camera X (Right->Left)
+        # and H corresponds to Camera Y (Superior->Inferior).
+        # We simply transpose it to (H, W) for standard image row/col indexing. No flips needed!
+        image_np = image_np.T.copy()
 
         drr_tensor = (
             torch.from_numpy(image_np)
