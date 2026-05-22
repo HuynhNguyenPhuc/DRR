@@ -60,7 +60,10 @@ def build_diffdrr_renderer(
         delx   = delx,
     ).to(device)
 
-    # Wrap the DiffDRR object to fix the horizontal flip mismatch
+    # Wrap the DiffDRR object to fix the horizontal flip mismatch.
+    # DiffDRR uses a right-handed camera (cross(right, up) = ray), while medical 
+    # DRR conventions use a left-handed camera (right = cross(view, up)). 
+    # This means DiffDRR's native output is inherently horizontally mirrored.
     class DRRWrapper(torch.nn.Module):
         def __init__(self, drr_module):
             super().__init__()
@@ -73,9 +76,6 @@ def build_diffdrr_renderer(
     drr_wrapper = DRRWrapper(drr)
 
     # Initial rotation and translation estimates
-    # DiffDRR places the source at origin and the camera looks along +Y.
-    # To support arbitrary view_dir and up_vec, we compute the rotation R_cw
-    # from World to DiffDRR Camera space, and the translation T_c.
     import numpy as np
     
     d = np.array([geo.view_dir_x, geo.view_dir_y, geo.view_dir_z], dtype=np.float32)
@@ -84,30 +84,35 @@ def build_diffdrr_renderer(
     u = np.array([geo.up_vec_x, geo.up_vec_y, geo.up_vec_z], dtype=np.float32)
     u = u / np.linalg.norm(u)
     
+    # Re-orthogonalize u
     r = np.cross(d, u)
     r = r / np.linalg.norm(r)
-    
-    # Re-orthogonalize u
     u = np.cross(r, d)
-    u = u / np.linalg.norm(u)
     
-    # R_cw maps from World to DiffDRR Camera Space (where d maps to +Y, u to +Z)
-    R_cw_np = np.stack([r, d, u], axis=0)
-    R_cw = torch.from_numpy(R_cw_np).to(device)
+    # DiffDRR's unreoriented base camera is effectively Left-Handed, with:
+    # ray=[0,-1,0], up=[0,0,1], right=[-1,0,0]
+    # We want ray=d, up=u, right=r.
+    # Therefore rotmat must map [0,-1,0]->d, [0,0,1]->u, [-1,0,0]->r.
+    # So the columns of rotmat are [-r, -d, u]
+    rotmat_np = np.stack([-r, -d, u], axis=1)
+    rotmat = torch.from_numpy(rotmat_np).to(device)
     
     try:
         from pytorch3d.transforms import matrix_to_euler_angles
-        # DiffDRR uses PyTorch3D transforms (P @ R + T), so we must pass the transpose of R_cw
-        rot = matrix_to_euler_angles(R_cw.T, "ZXY").unsqueeze(0)
+        rot = matrix_to_euler_angles(rotmat, "ZXY").unsqueeze(0)
     except ImportError:
-        logger.warning("[DiffDRR] pytorch3d not available for matrix_to_euler_angles, falling back to identity rotation.")
+        logger.warning("[DiffDRR] pytorch3d not available, falling back to identity.")
         rot = torch.tensor([[0.0, 0.0, 0.0]], device=device)
 
-    # Compute T_c: we want World isocenter I_w to map to Camera isocenter [0, SAD, 0]
-    I_w = torch.tensor([geo.isocenter_x, geo.isocenter_y, geo.isocenter_z], device=device, dtype=torch.float32)
-    I_c = torch.tensor([0.0, geo.sad, 0.0], device=device, dtype=torch.float32)
+    # Compute translation in the camera frame
+    # DiffDRR applies camera_center = rotmat @ translation
+    # We want camera_center = isocenter - sad * d
+    # Therefore translation = rotmat.T @ (isocenter - sad * d)
+    I_w = np.array([geo.isocenter_x, geo.isocenter_y, geo.isocenter_z], dtype=np.float32)
+    t_x = -np.dot(r, I_w)
+    t_y = -np.dot(d, I_w) + geo.sad
+    t_z =  np.dot(u, I_w)
     
-    T_c = I_c - torch.matmul(R_cw, I_w)
-    xyz = T_c.unsqueeze(0)
+    xyz = torch.tensor([[t_x, t_y, t_z]], device=device, dtype=torch.float32)
 
     return drr_wrapper, rot, xyz

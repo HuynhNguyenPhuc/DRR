@@ -244,11 +244,14 @@ class BaseXRayVolumeRenderer(nn.Module):
         screen_RGBA, bundle = self.renderer(cameras=cameras, volumes=volumes)
         screen_RGBA = screen_RGBA.permute(0, 3, 1, 2)          # (B, 4, H, W)
 
-        rgb_channels = screen_RGBA[:, :3, :, :]                 # (B, 3, H, W)
-        screen_RGB   = (
-            rgb_channels.mean(dim=1, keepdim=True)
+        # For X-ray, the true attenuation is the opacity channel (index 3).
+        # We use opacity instead of the emission features to simulate Beer-Lambert transmission.
+        opacities = screen_RGBA[:, 3:4, :, :]                  # (B, 1, H, W)
+        
+        screen_RGB = (
+            opacities
             if is_grayscale
-            else rgb_channels
+            else opacities.repeat(1, 3, 1, 1)
         )
 
         if norm_type == "minimized":
