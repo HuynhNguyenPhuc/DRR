@@ -147,20 +147,19 @@ def generate_deepdrr_drr(
             device  = dd_device,
             neglog  = True,     # return attenuation (-log T): air=dark, bone=bright
         ) as projector:
-            image_np = projector()  # (W, H) float32
-
-        # DeepDRR's projector returns (W, H) where W corresponds to Camera X (Right->Left)
-        # and H corresponds to Camera Y (Superior->Inferior).
-        # Transpose to (H, W) and flip the Y-axis so Superior is at the top.
-        image_np = np.flip(image_np.T, axis=0).copy()
+            image_np = projector()
 
         drr_tensor = (
-            torch.from_numpy(image_np)
+            torch.from_numpy(image_np.copy())
             .float()
             .unsqueeze(0)
             .unsqueeze(0)
             .to(device)
         )
+        
+        # DeepDRR projects the image correctly oriented (H, W) but mirrored 
+        # along the horizontal axis compared to standard views.
+        drr_tensor = torch.flip(drr_tensor, dims=[-1])
         
         return drr_tensor
 
