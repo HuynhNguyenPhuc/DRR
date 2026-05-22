@@ -149,17 +149,18 @@ def generate_deepdrr_drr(
         ) as projector:
             image_np = projector()
 
+        # DeepDRR returns the array in (W, H). We transpose to (H, W).
+        # We also need to horizontally mirror it to match the standard Right-Handed 
+        # views of Plastimatch, since DeepDRR relies on an LPS Left-Handed internal mapping.
+        image_np = np.flip(image_np.T, axis=1).copy()
+
         drr_tensor = (
-            torch.from_numpy(image_np.copy())
+            torch.from_numpy(image_np)
             .float()
             .unsqueeze(0)
             .unsqueeze(0)
             .to(device)
         )
-        
-        # DeepDRR projects the image correctly oriented (H, W) but mirrored 
-        # along the horizontal axis compared to standard views.
-        drr_tensor = torch.flip(drr_tensor, dims=[-1])
         
         return drr_tensor
 
