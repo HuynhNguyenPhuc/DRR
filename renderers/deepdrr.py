@@ -90,9 +90,9 @@ def generate_deepdrr_drr(
         # Dim 0 maps to X (Left)
         # Dim 1 maps to -Z (Inferior)
         # Dim 2 maps to Y (Posterior)
-        # Since our array is (X, Y, Z), we must transpose to (X, Z, Y) 
-        # and flip Dim 1 to match DeepDRR's expectations perfectly.
-        hu_itk = np.transpose(hu_values, (0, 2, 1))
+        # Since our array is (X, Y, Z), we must transpose to (Y, Z, X) 
+        # to map them correctly, and flip Dim 1 (-Z) to match.
+        hu_itk = np.transpose(hu_values, (1, 2, 0))
         hu_itk = np.flip(hu_itk, axis=1)
         hu_itk = np.ascontiguousarray(hu_itk)
         
