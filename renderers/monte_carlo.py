@@ -177,10 +177,6 @@ def _march_primary(
     ray_vec  = pixel_pos - source_pos[None, None, :]  # (H, W, 3)
     ray_len  = np.linalg.norm(ray_vec, axis=-1)       # (H, W)
 
-    # Step length in mm (same for every ray, approximately).
-    mean_len = float(ray_len.mean())
-    step_mm  = mean_len / n_pts
-
     line_integral = np.zeros((H, W), dtype=np.float64)
 
     for k in range(n_pts):
@@ -213,7 +209,7 @@ def _march_primary(
         mu_eff  = density * (density * mu_bone_e + (1.0 - density) * mu_tissue_e)
         line_integral += mu_eff
 
-    line_integral *= step_mm
+    line_integral *= (ray_len / n_pts)
     return np.exp(-line_integral).astype(np.float32)    # transmission (H, W)
 
 

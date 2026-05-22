@@ -70,8 +70,7 @@ def build_diffdrr_renderer(
             self.drr_module = drr_module
 
         def forward(self, *args, **kwargs):
-            img = self.drr_module(*args, **kwargs)
-            return torch.flip(img, dims=[-1])
+            return self.drr_module(*args, **kwargs)
 
     drr_wrapper = DRRWrapper(drr)
 

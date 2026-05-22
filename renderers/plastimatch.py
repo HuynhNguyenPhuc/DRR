@@ -68,8 +68,10 @@ def generate_plastimatch_drr(
         # Center the volume at the world origin so the isocenter (0,0,0) passes
         # through the volume midpoint — matching DVR, DiffDRR, and MC renderers.
         # vol_np axes are (X, Y, Z), so shape[0] is X dimension.
-        half = float(vol_np.shape[0]) * voxel_spacing / 2.0
-        image.SetOrigin([-half, -half, -half])
+        half_x = float(vol_np.shape[0]) * voxel_spacing / 2.0
+        half_y = float(vol_np.shape[1]) * voxel_spacing / 2.0
+        half_z = float(vol_np.shape[2]) * voxel_spacing / 2.0
+        image.SetOrigin([-half_x, -half_y, -half_z])
         sitk.WriteImage(image, in_path)
 
         # 5. Build plastimatch command

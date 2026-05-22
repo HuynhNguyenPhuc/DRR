@@ -67,14 +67,14 @@ def _require_pytorch3d():
 # Custom Raymarcher
 # ═════════════════════════════════════════════════════════════════════════════
 
-class AbsorptionEmissionRaymarcher(EmissionAbsorptionRaymarcher if _PYTORCH3D_AVAILABLE else object):
-    """Custom absorption-emission raymarcher for X-Ray volume rendering."""
-
-    def __init__(self, *args, **kwargs):
-        # Check for PyTorch3D availability.
-        _require_pytorch3d()
-
-        super().__init__(*args, **kwargs)
+class ExactXRayRaymarcher(nn.Module):
+    """
+    True Beer-Lambert Line Integral Raymarcher.
+    Outputs absolute attenuation values matching DiffDRR and Plastimatch.
+    """
+    def __init__(self, step_size: float):
+        super().__init__()
+        self.step_size = step_size
 
     def forward(
         self,
@@ -84,68 +84,22 @@ class AbsorptionEmissionRaymarcher(EmissionAbsorptionRaymarcher if _PYTORCH3D_AV
         **kwargs,
     ) -> torch.Tensor:
         """
-        Perform reversed absorption-emission raymarching.
-
-        This method computes transmittance starting from the far end of each ray and integrates features toward the camera. 
-        Compared to the default PyTorch3D implementation, the accumulation order is reversed to better model X-ray attenuation behavior.
-
-        Args:
-            rays_densities:
-                Tensor of shape ``(B, R, N, 1)`` containing density or absorption values along each ray, where:
-
-                - ``B`` = batch size
-                - ``R`` = number of rays
-                - ``N`` = number of sampled points per ray
-
-                Values are expected to lie in the range ``[0, 1]``.
-
-            rays_features:
-                Tensor of shape ``(B, R, N, F)`` containing feature vectors associated with each sampled point along the ray, where ``F`` is the feature dimension.
-
-            eps:
-                Small numerical stability constant added during cumulative product computation to avoid zero-transmittance instability.
-
-            **kwargs:
-                Additional keyword arguments accepted for API compatibility.
-
-        Returns:
-            Tensor of shape ``(B, R, F + 1)`` containing:
-
-            - Integrated feature values of shape ``(B, R, F)``
-            - Final opacity values of shape ``(B, R, 1)``
-
-            The last channel corresponds to the accumulated opacity for each ray.
+        rays_densities: (batch, num_rays, num_samples, 1)
         """
-        # Ensure inputs are valid and compatible.
-        _check_raymarcher_inputs(
-            rays_densities, rays_features, None,
-            z_can_be_none=True,
-            features_can_be_none=False,
-            density_1d=True,
-        )
-
-        # Ensure densities are in [0, 1] for physical plausibility.
-        _check_density_bounds(rays_densities)
-
-        rays_densities = rays_densities[..., 0]
-
-        # Reverse direction: compute absorption from the end of the ray backwards.
-        absorption = _shifted_cumprod(
-            (1.0 + eps) - rays_densities.flip(dims=(-1,)),
-            shift=-self.surface_thickness,
-        ).flip(dims=(-1,))
-
-        # Compute features and opacities along the ray.
-        weights  = rays_densities * absorption
-        features = (weights[..., None] * rays_features).sum(dim=-2)
-        opacities = 1.0 - torch.prod(1.0 - rays_densities, dim=-1, keepdim=True)
-
-        return torch.cat((features, opacities), dim=-1)
+        # X-ray physics: Simply integrate the attenuation coefficients along the ray.
+        # No cumprod, no exponentials, no 1.0 - prod(). 
+        # Just the sum of densities multiplied by the physical step size.
+        
+        ray_integrals = torch.sum(rays_densities, dim=-2) * self.step_size
+        
+        # PyTorch3D renderers expect output of shape (batch, num_rays, feature_dim + 1)
+        # We will duplicate the integral into the RGB channels (features) and Opacity channel
+        return torch.cat((ray_integrals, ray_integrals[..., :1]), dim=-1)
 
 
 # Aliases
-ScreenCentricRaymarcher = AbsorptionEmissionRaymarcher
-ObjectCentricRaymarcher = EmissionAbsorptionRaymarcher if _PYTORCH3D_AVAILABLE else None
+ScreenCentricRaymarcher = ExactXRayRaymarcher
+ObjectCentricRaymarcher = ExactXRayRaymarcher
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -195,7 +149,7 @@ class BaseXRayVolumeRenderer(nn.Module):
         volume: torch.Tensor,
         cameras,
         opacity: torch.Tensor | None = None,
-        norm_type: str = "standardized",
+        norm_type: str = None,
         scaling_factor: float = 1.0,
         is_grayscale: bool = True,
         return_bundle: bool = False,
@@ -208,8 +162,7 @@ class BaseXRayVolumeRenderer(nn.Module):
             volume: ``(B, C, D, H, W)`` density tensor, values in ``[0, 1]``.
             cameras: PyTorch3D cameras object defining the viewpoint(s).
             opacity: Optional ``(B, 1, D, H, W)`` opacity override.
-            norm_type: One of ``"minimized"``, ``"normalized"``,
-                ``"standardized"``, or ``None``.
+            norm_type: Must be None for physically exact line integrals.
             scaling_factor: Multiplier applied to densities.
             is_grayscale: If ``True`` the three RGB channels are averaged
                 before returning.
@@ -226,7 +179,7 @@ class BaseXRayVolumeRenderer(nn.Module):
         densities = (
             opacity * scaling_factor
             if opacity is not None
-            else torch.ones_like(volume[:, [0]]) * scaling_factor
+            else volume[:, [0]] * scaling_factor
         )
         
         # PyTorch3D grid_sample maps the last dimension (W) to X, middle (H) to Y, first (D) to Z.
@@ -244,26 +197,25 @@ class BaseXRayVolumeRenderer(nn.Module):
         screen_RGBA, bundle = self.renderer(cameras=cameras, volumes=volumes)
         screen_RGBA = screen_RGBA.permute(0, 3, 1, 2)          # (B, 4, H, W)
 
-        rgb_channels = screen_RGBA[:, :3, :, :]                 # (B, 3, H, W)
-        screen_RGB   = (
-            rgb_channels.mean(dim=1, keepdim=True)
+        # For X-ray, the true attenuation is the opacity channel (index 3).
+        opacities = screen_RGBA[:, 3:4, :, :]                  # (B, 1, H, W)
+        
+        screen_RGB = (
+            opacities
             if is_grayscale
-            else rgb_channels
+            else opacities.repeat(1, 3, 1, 1)
         )
 
-        if norm_type == "minimized":
-            screen_RGB = minimized(screen_RGB)
-        elif norm_type == "normalized":
-            screen_RGB = normalized(screen_RGB)
-        elif norm_type == "standardized":
-            screen_RGB = normalized(standardized(screen_RGB))
+        # Ensure normalization is strictly bypassed
+        if norm_type is not None:
+             raise ValueError("Do not normalize physical X-ray integrals! Set norm_type=None.")
 
         return (screen_RGB, bundle) if return_bundle else screen_RGB
 
 
 class ScreenCentricXRayVolumeRenderer(BaseXRayVolumeRenderer):
     """
-    Screen-centric renderer — uses EmissionAbsorptionRaymarcher.
+    Screen-centric renderer — uses ExactXRayRaymarcher.
     """
 
     def __init__(self, **kwargs):
@@ -281,15 +233,14 @@ class ScreenCentricXRayVolumeRenderer(BaseXRayVolumeRenderer):
         )
 
     def _create_raymarcher(self):
-        return EmissionAbsorptionRaymarcher()
+        # Calculate the physical distance between sample points along the ray
+        step_size = (self.max_depth - self.min_depth) / self.n_pts_per_ray
+        return ExactXRayRaymarcher(step_size=step_size)
 
 
 class ObjectCentricXRayVolumeRenderer(BaseXRayVolumeRenderer):
     """
-    Object-centric renderer — uses AbsorptionEmissionRaymarcher.
-
-    This reverses the integration order so that absorbing structures
-    (e.g., bones) appear bright in the final X-ray image.
+    Object-centric renderer — uses ExactXRayRaymarcher.
     """
 
     def __init__(self, **kwargs):
@@ -307,14 +258,16 @@ class ObjectCentricXRayVolumeRenderer(BaseXRayVolumeRenderer):
         )
 
     def _create_raymarcher(self):
-        return AbsorptionEmissionRaymarcher()
+        # Calculate the physical distance between sample points along the ray
+        step_size = (self.max_depth - self.min_depth) / self.n_pts_per_ray
+        return ExactXRayRaymarcher(step_size=step_size)
 
 
 __all__ = [
     "minimized",
     "normalized",
     "standardized",
-    "AbsorptionEmissionRaymarcher",
+    "ExactXRayRaymarcher",
     "ScreenCentricRaymarcher",
     "ObjectCentricRaymarcher",
     "BaseXRayVolumeRenderer",
@@ -415,4 +368,3 @@ def build_dvr_renderer(image_size: int, n_pts: int, ct_size: int, voxel_spacing:
     )
 
     return renderer, cameras
-
