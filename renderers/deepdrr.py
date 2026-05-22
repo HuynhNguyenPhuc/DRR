@@ -149,12 +149,9 @@ def generate_deepdrr_drr(
         ) as projector:
             image_np = projector()  # (W, H) float32
 
-        # Rotate to (H, W) to match our image format. 
-        # Since the input volume is properly aligned, we simply transpose.
-        image_np = image_np.T.copy()
-
-        # 5. Return physical attenuation
-        # (Removed Normalization: We preserve the physical -log(T) integral values)
+        # The native image_np from DeepDRR is already in (H, W) format 
+        # and correctly oriented (Superior at Row 0, Patient Left at Col Max).
+        image_np = image_np.copy()
 
         drr_tensor = (
             torch.from_numpy(image_np)
