@@ -155,14 +155,11 @@ def generate_deepdrr_drr(
         ) as projector:
             image_np = projector()  # (W, H) float32
 
-        # DeepDRR returns the image in (W, H) order where W is Patient Left and H is Inferior.
-        # Transpose to (H, W) and flip both axes so Row 0 is Superior (Head at top) 
-        # and Col 0 is Patient Right (Standard AP view).
-        image_np = np.flip(image_np.T, axis=(0, 1)).copy()
+        # Rotate to (H, W) and flip vertically if needed to match Plastimatch
+        image_np = np.flip(image_np.T, axis=0).copy()
 
-        # 5. Normalise and return
-        lo, hi = float(image_np.min()), float(image_np.max())
-        image_np = (image_np - lo) / (hi - lo + 1e-8)
+        # 5. Return physical attenuation
+        # (Removed Normalization: We preserve the physical -log(T) integral values)
 
         drr_tensor = (
             torch.from_numpy(image_np)
@@ -171,9 +168,6 @@ def generate_deepdrr_drr(
             .unsqueeze(0)
             .to(device)
         )
-        
-        # Flip horizontally to match Monte Carlo, DVR, and DiffDRR
-        drr_tensor = torch.flip(drr_tensor, dims=[-1])
         
         return drr_tensor
 
