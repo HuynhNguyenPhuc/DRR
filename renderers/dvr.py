@@ -228,6 +228,11 @@ class BaseXRayVolumeRenderer(nn.Module):
             if opacity is not None
             else torch.ones_like(volume[:, [0]]) * scaling_factor
         )
+        
+        # PyTorch3D grid_sample maps the last dimension (W) to X, middle (H) to Y, first (D) to Z.
+        # Our volume is (X, Y, Z), so we must transpose X and Z to pass to PyTorch3D as (Z, Y, X).
+        features = features.permute(0, 1, 4, 3, 2)
+        densities = densities.permute(0, 1, 4, 3, 2)
 
         shape   = max(features.shape[2], features.shape[3])
         volumes = Volumes(
@@ -272,7 +277,6 @@ class ScreenCentricXRayVolumeRenderer(BaseXRayVolumeRenderer):
             n_pts_per_ray=self.n_pts_per_ray,
             min_depth=self.min_depth,
             max_depth=self.max_depth,
-            ndc_extent=self.ndc_extent,
             stratified_sampling=False,
         )
 
@@ -299,7 +303,6 @@ class ObjectCentricXRayVolumeRenderer(BaseXRayVolumeRenderer):
             n_pts_per_ray=self.n_pts_per_ray,
             min_depth=self.min_depth,
             max_depth=self.max_depth,
-            ndc_extent=self.ndc_extent,
             stratified_sampling=False,
         )
 
@@ -391,13 +394,14 @@ def build_dvr_renderer(image_size: int, n_pts: int, ct_size: int, voxel_spacing:
     x_cam = x_cam / np.linalg.norm(x_cam)
     y_cam = np.cross(z_cam, x_cam)
 
-    R_np = np.stack([x_cam, y_cam, z_cam], axis=0)
+    R_np = np.stack([x_cam, y_cam, z_cam], axis=1)
     R = torch.from_numpy(R_np).to(device)
 
     # 5. Source translation
     # Source S = I - SAD * d. In world NDC, SAD becomes sad_ndc
-    S = -sad_ndc * d
-    T_np = -R_np @ S
+    I_ndc = np.array([geo.isocenter_x, geo.isocenter_y, geo.isocenter_z], dtype=np.float32) * (2.0 / L)
+    S = I_ndc - sad_ndc * d
+    T_np = -S @ R_np
     T = torch.from_numpy(T_np).unsqueeze(0).to(device)
 
     cameras = PerspectiveCameras(

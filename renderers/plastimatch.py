@@ -39,13 +39,13 @@ def generate_plastimatch_drr(
         subprocess.run(["plastimatch", "--version"], capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         logger.error("[Plastimatch] Executable not found in PATH.")
-        raise RuntimeError("Plastimatch executable not found in PATH. It is strictly required for Ground Truth.") from exc
+        return None
 
     try:
         import SimpleITK as sitk
     except ImportError as exc:
         logger.error("[Plastimatch] SimpleITK is required but not installed.")
-        raise RuntimeError("SimpleITK is required but not installed. Run `pip install SimpleITK`.") from exc
+        return None
 
     # 2. Extract dimensions
     assert volume_tensor.dim() == 5, "Expected (1, 1, D, H, W)"
@@ -58,19 +58,25 @@ def generate_plastimatch_drr(
         out_prefix = os.path.join(tmpdir, "drr")
 
         # 4. Save CT volume
-        image = sitk.GetImageFromArray(vol_np)
+        # Plastimatch's DRR lookup table expects Hounsfield Units (HU).
+        # Convert normalised density [0, 1] → HU: 0 = -1000 (air), 1 = +3000 (bone).
+        hu_np = (vol_np * 4_000.0 - 1_000.0).astype(np.float32)
+        # vol_np is (X, Y, Z). SimpleITK GetImageFromArray expects (Z, Y, X) order for 3D numpy arrays.
+        hu_np = np.transpose(hu_np, (2, 1, 0))
+        image = sitk.GetImageFromArray(hu_np)
         image.SetSpacing([voxel_spacing, voxel_spacing, voxel_spacing])
         # Center the volume at the world origin so the isocenter (0,0,0) passes
         # through the volume midpoint — matching DVR, DiffDRR, and MC renderers.
-        # SimpleITK uses (x, y, z) order; vol_np axes are (D, H, W) = (z, y, x).
-        half = float(vol_np.shape[0]) * voxel_spacing / 2.0
-        image.SetOrigin([-half, -half, -half])
+        # vol_np axes are (X, Y, Z), so shape[0] is X dimension.
+        half_x = float(vol_np.shape[0]) * voxel_spacing / 2.0
+        half_y = float(vol_np.shape[1]) * voxel_spacing / 2.0
+        half_z = float(vol_np.shape[2]) * voxel_spacing / 2.0
+        image.SetOrigin([-half_x, -half_y, -half_z])
         sitk.WriteImage(image, in_path)
 
         # 5. Build plastimatch command
         geo = geometry or DEFAULT_GEOMETRY
         fov = vol_np.shape[0] * voxel_spacing
-
         cmd = [
             "plastimatch", "drr",
             "-i", "exact",           # Exact raytracing algorithm
@@ -78,7 +84,7 @@ def generate_plastimatch_drr(
             "-I", in_path,
             "-O", out_prefix,        # Prefix only, no extension
             "-r", f"{image_size} {image_size}",
-            "-z", f"{fov} {fov}",
+            "-z", f"{fov:.2f} {fov:.2f}",
             "-o", f"{geo.isocenter_x} {geo.isocenter_y} {geo.isocenter_z}", # Isocenter
             "--sid", str(geo.sdd),
             "--sad", str(geo.sad),
@@ -108,10 +114,13 @@ def generate_plastimatch_drr(
             dims = f.readline().decode().strip()
             scale = float(f.readline().decode().strip())
             cols, rows = map(int, dims.split())
-            drr_np = np.frombuffer(f.read(), dtype=np.float32).copy()
+            
+            endian = '<' if scale < 0 else '>'
+            drr_np = np.frombuffer(f.read(), dtype=f"{endian}f4").copy()
             drr_np = drr_np.reshape((rows, cols))
-            if scale < 0:  # little-endian, flip vertically
-                drr_np = np.flipud(drr_np)
+            
+            # Plastimatch's coordinate system (u = vup x n) exactly matches 
+            # our Monte Carlo setup (right = view x up). No flipping required.
 
         drr_np = drr_np[np.newaxis, np.newaxis, ...]  # (1, 1, H, W)
 

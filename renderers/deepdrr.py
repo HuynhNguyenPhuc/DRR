@@ -82,14 +82,26 @@ def generate_deepdrr_drr(
         # 2. Build DeepDRR volume from HU
         hu_values = _density_to_hu(volume_tensor)  # (D, H, W)
 
-        # Centre the volume at the world origin, matching other renderers.
         half_mm = D * voxel_spacing / 2.0
-        origin  = ddgeo.point(-half_mm, -half_mm, -half_mm)
         spacing = (float(voxel_spacing),) * 3
+
+        # Our NIfTI volume is (X, Y, Z) = (Left, Posterior, Superior).
+        # When DeepDRR uses anatomical_coordinate_system="LPS", its internal transform 
+        # maps indices (i, j, k) to physical coordinates (x, y, z) as:
+        # x = i (Left), y = k (Posterior), z = -j (Superior).
+        # Therefore, DeepDRR expects the numpy array axes to be (Left, Inferior, Posterior).
+        # We transpose our (Left, Posterior, Superior) array to (Left, Superior, Posterior), 
+        # and flip the Superior axis to Inferior.
+        hu_itk = np.transpose(hu_values, (0, 2, 1))
+        hu_itk = np.flip(hu_itk, axis=1)
+        hu_itk = np.ascontiguousarray(hu_itk)
+        
+        # Center the volume at the world origin
+        origin = ddgeo.point(-half_mm, -half_mm, -half_mm)
 
         logger.debug("[DeepDRR] Segmenting materials (use_thresholding=True) ...")
         ct_volume = deepdrr.Volume.from_hu(
-            hu_values=hu_values,
+            hu_values=hu_itk,
             origin=origin,
             spacing=spacing,
             anatomical_coordinate_system="LPS",
@@ -108,16 +120,27 @@ def generate_deepdrr_drr(
         )
 
         # View direction and up-vector in world coordinates.
-        # DeepDRR's world = anatomical (LPS) which we align with our world.
-        view_dir_world = ct_volume.world_from_anatomical @ ddgeo.vector(
+        # We aligned the volume's center with the world origin (0,0,0).
+        # So our geo view and up vectors are directly in DeepDRR's world space.
+        view_dir_world = ddgeo.vector(
             geo.view_dir_x, geo.view_dir_y, geo.view_dir_z,
         )
-        up_vec_world = ct_volume.world_from_anatomical @ ddgeo.vector(
+        up_vec_world = ddgeo.vector(
             geo.up_vec_x, geo.up_vec_y, geo.up_vec_z,
         )
 
+        # We must add the config isocenter offset to the volume's physical center in world
+        cx = float(ct_volume.center_in_world[0])
+        cy = float(ct_volume.center_in_world[1])
+        cz = float(ct_volume.center_in_world[2])
+        isocenter = ddgeo.point(
+            cx + geo.isocenter_x, 
+            cy + geo.isocenter_y, 
+            cz + geo.isocenter_z
+        )
+
         dd_device.set_view(
-            point                  = ct_volume.center_in_world,
+            point                  = isocenter,
             direction              = view_dir_world,
             up                     = up_vec_world,
             source_to_point_fraction = geo.sad / geo.sdd,
@@ -128,9 +151,14 @@ def generate_deepdrr_drr(
         with deepdrr.Projector(
             ct_volume,
             device  = dd_device,
-            neglog  = False,    # return transmission (same polarity as Plastimatch / MC)
+            neglog  = True,     # return attenuation (-log T): air=dark, bone=bright
         ) as projector:
-            image_np = projector()  # (H, W) float32
+            image_np = projector()  # (W, H) float32
+
+        # DeepDRR returns the image in (W, H) order where W is Patient Left and H is Inferior.
+        # Transpose to (H, W) and flip both axes so Row 0 is Superior (Head at top) 
+        # and Col 0 is Patient Right (Standard AP view).
+        image_np = np.flip(image_np.T, axis=(0, 1)).copy()
 
         # 5. Normalise and return
         lo, hi = float(image_np.min()), float(image_np.max())
@@ -143,6 +171,10 @@ def generate_deepdrr_drr(
             .unsqueeze(0)
             .to(device)
         )
+        
+        # Flip horizontally to match Monte Carlo, DVR, and DiffDRR
+        drr_tensor = torch.flip(drr_tensor, dims=[-1])
+        
         return drr_tensor
 
     except Exception as exc:

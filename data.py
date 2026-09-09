@@ -90,7 +90,7 @@ def load_ct_volume(ct_path: str | None = None, target_size: int = 128):
         volume_tensor = vol.unsqueeze(0).unsqueeze(0)
 
     # ── Final Processing: Resample & Clamp ───────────────────────────────────
-    if volume_tensor.shape[2] != target_size:
+    if volume_tensor.shape[2] != target_size or volume_tensor.shape[3] != target_size or volume_tensor.shape[4] != target_size:
         logger.info("[DATA] Resampling to %d³ ...", target_size)
         volume_tensor = F.interpolate(
             volume_tensor,
@@ -98,6 +98,7 @@ def load_ct_volume(ct_path: str | None = None, target_size: int = 128):
             mode="trilinear",
             align_corners=False,
         )
+        subject = None  # Force recreation with the new tensor and spacing
 
     # Clamp the values to [0, 1] range to avoid physically impossible densities
     volume_tensor = volume_tensor.clamp(0.0, 1.0)
@@ -144,7 +145,31 @@ def make_diffdrr_subject(volume_tensor: torch.Tensor, voxel_spacing: float = 2.0
          [0,  0,  0,  1.0   ]],
         dtype=np.float64,
     )
-    dens_4d    = volume_tensor.squeeze(0)
-    scalar_img = torchio.ScalarImage(tensor=dens_4d.cpu().numpy(), affine=affine)
-    sub        = torchio.Subject(density=scalar_img)
+    dens_4d     = volume_tensor.squeeze(0)
+    img_np      = dens_4d.cpu().numpy()
+    scalar_img  = torchio.ScalarImage(tensor=img_np, affine=affine)
+    # DRR.__init__ reads subject.density.data; for our phantom the volume is
+    # already normalised [0,1] so density == volume.
+    density_img = torchio.ScalarImage(tensor=img_np, affine=affine)
+
+    # AP reorient matrix — same 4×4 produced by DiffDRR's read(orientation="AP").
+    # Rotates the C-arm about the x-axis by 90° so the detector faces the AP direction.
+    reorient = torch.tensor(
+        [[1, 0,  0, 0],
+         [0, 0, -1, 0],
+         [0, 1,  0, 0],
+         [0, 0,  0, 1]],
+        dtype=torch.float32,
+    )
+
+    # TorchIO Subject may silently drop non-Image kwargs (None, plain tensors,
+    # strings) depending on the installed version.  Create the Subject with
+    # only the two Image entries that are unconditionally stored, then attach
+    # every non-Image attribute directly to the instance so that Python's
+    # __getattribute__ (which checks instance.__dict__ first) finds them
+    # before __getattr__ ever looks inside the dict.
+    sub = torchio.Subject(volume=scalar_img, density=density_img)
+    sub.mask      = None     # DRR.__init__: `if subject.mask is not None`
+    sub.fiducials = None     # canonicalize(): `if subject.fiducials is not None`
+    sub.reorient  = reorient # DRR.__init__: passed to Detector
     return canonicalize(sub)
