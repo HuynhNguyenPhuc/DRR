@@ -175,3 +175,7 @@ poetry.toml
 
 # LSP config files
 pyrightconfig.json
+
+### Local ###
+CLAUDE.md
+gh-keyring.gpg
