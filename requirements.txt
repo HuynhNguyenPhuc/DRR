@@ -11,3 +11,5 @@ matplotlib
 scikit-image
 nibabel
 SimpleITK
+-e .
+

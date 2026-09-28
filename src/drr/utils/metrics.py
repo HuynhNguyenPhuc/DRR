@@ -3,19 +3,19 @@
 import numpy as np
 import torch
 
+
 def compute_metrics(pred: torch.Tensor, ref: torch.Tensor):
     """
-    Compute RMSE, PSNR and SSIM between a prediction and a reference image.
+    Compute RMSE, PSNR, and SSIM between two images.
 
     Both tensors are normalised to [0, 1] before comparison.
 
     Args:
-        pred (torch.Tensor): Predicted image tensor (any shape).
-        ref (torch.Tensor): Reference image tensor (any shape, same as pred).
+        pred (torch.Tensor): The rendered image.
+        ref (torch.Tensor): The image to compare against.
 
     Returns:
-        tuple[float, float, float]: ``(rmse, psnr, ssim)``.
-        ``ssim`` is ``float("nan")`` when *scikit-image* is not installed.
+        tuple: (RMSE, PSNR, SSIM) as floats.
     """
     # Move to CPU and convert to NumPy for metric computation.
     p = pred.detach().float().cpu().squeeze().numpy()

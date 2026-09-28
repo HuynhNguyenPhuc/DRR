@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drr-benchmark"
+version = "0.1.0"
+description = "A unified and high-performance benchmarking suite for Digitally Reconstructed Radiographs (DRRs)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]

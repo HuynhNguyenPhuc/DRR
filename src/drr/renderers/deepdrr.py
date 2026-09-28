@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from utils.logger import get_logger
+from drr.utils.logger import get_logger
 from .config import GeometryConfig, DEFAULT_GEOMETRY
 
 
@@ -21,14 +21,14 @@ def _density_to_hu(volume_tensor: torch.Tensor) -> np.ndarray:
     """
     Convert normalised density [0, 1] to approximate Hounsfield Units (HU).
 
-    Linear mapping: 0 → -1000 HU (air), 1 → +3000 HU (cortical bone).
-    For real CT data, original HU values should be used directly.
+    Linear mapping: 0 → -1000 HU (air), 1 → +3000 HU (cortical bone). 
+    For real CT data, original HU values should be used directly instead.
 
     Args:
-        volume_tensor (torch.Tensor): Density volume ``(1, 1, D, H, W)``.
+        volume_tensor (torch.Tensor): The CT density volume.
 
     Returns:
-        np.ndarray: HU volume ``(D, H, W)`` as ``float32``.
+        np.ndarray: The volume in Hounsfield Units, as ``float32``.
     """
     vol_np = volume_tensor.detach().cpu().squeeze().numpy()  # (D, H, W)
     hu = vol_np * 4_000.0 - 1_000.0
@@ -45,22 +45,18 @@ def generate_deepdrr_drr(
     """
     Generate a physically realistic DRR using DeepDRR's GPU-accelerated simulator.
 
-    Models beam-hardening and Compton scatter (validated against full Monte Carlo),
-    making it a physics-based reference that is orders of magnitude faster than
-    stochastic photon-tracking codes. Requires CUDA/Linux; returns None otherwise.
+    Models beam-hardening and Compton scatter, making it a physics-based reference 
+    that is orders of magnitude faster than stochastic photon-tracking codes.
 
     Args:
-        volume_tensor (torch.Tensor): CT density volume ``(1, 1, D, H, W)``
-            normalised to ``[0, 1]``.
-        voxel_spacing (float): Isotropic voxel spacing in mm.
-        image_size (int): Square output image resolution in pixels.
-        device (torch.device): Target device; internal GPU compute via cupy.
-        geometry (GeometryConfig): X-ray geometry configuration; uses
-            DEFAULT_GEOMETRY if None.
+        volume_tensor (torch.Tensor): The CT density volume, in [0, 1].
+        voxel_spacing (float): The voxel size in mm.
+        image_size (int): The output resolution (square).
+        device (torch.device): The target device (internal GPU work runs via cupy).
+        geometry (GeometryConfig): The X-ray setup; defaults to ``DEFAULT_GEOMETRY``.
 
     Returns:
-        torch.Tensor | None: DRR image ``(1, 1, H, W)`` normalised to ``[0, 1]``,
-            or None if DeepDRR package/CUDA is unavailable or rendering fails.
+        torch.Tensor | None: Rendered DRR normalised to [0, 1].
     """
     # 1. Dependency check
     try:
@@ -78,6 +74,10 @@ def generate_deepdrr_drr(
     assert volume_tensor.dim() == 5, "Expected (1, 1, D, H, W)"
     D = volume_tensor.shape[2]
 
+    # Clear GPU memory before DeepDRR's cupy backend allocates its own arrays.
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
     try:
         # 2. Build DeepDRR volume from HU
         hu_values = _density_to_hu(volume_tensor)  # (D, H, W)
@@ -85,16 +85,8 @@ def generate_deepdrr_drr(
         half_mm = D * voxel_spacing / 2.0
         spacing = (float(voxel_spacing),) * 3
 
-        # Our NIfTI volume is (X, Y, Z) = (Left, Posterior, Superior).
-        # When DeepDRR uses anatomical_coordinate_system="LPS", its internal transform 
-        # maps indices (i, j, k) to physical coordinates (x, y, z) as:
-        # x = i (Left), y = k (Posterior), z = -j (Superior).
-        # Therefore, DeepDRR expects the numpy array axes to be (Left, Inferior, Posterior).
-        # We transpose our (Left, Posterior, Superior) array to (Left, Superior, Posterior), 
-        # and flip the Superior axis to Inferior.
-        hu_itk = np.transpose(hu_values, (0, 2, 1))
-        hu_itk = np.flip(hu_itk, axis=1)
-        hu_itk = np.ascontiguousarray(hu_itk)
+        # DeepDRR expects ITK-style (x, y, z) order, but our input is (z, y, x).
+        hu_itk = np.ascontiguousarray(np.flip(np.transpose(hu_values, (0, 2, 1)), axis=1))
         
         # Center the volume at the world origin
         origin = ddgeo.point(-half_mm, -half_mm, -half_mm)
@@ -121,7 +113,7 @@ def generate_deepdrr_drr(
 
         # View direction and up-vector in world coordinates.
         # We aligned the volume's center with the world origin (0,0,0).
-        # So our geo view and up vectors are directly in DeepDRR's world space.
+        # Therefore, our geo view and up vectors are directly in DeepDRR's world space.
         view_dir_world = ddgeo.vector(
             geo.view_dir_x, geo.view_dir_y, geo.view_dir_z,
         )
@@ -146,24 +138,39 @@ def generate_deepdrr_drr(
             source_to_point_fraction = geo.sad / geo.sdd,
         )
 
+        # Check if DeepDRR's realized up-vector is antiparallel to the requested up-vector.
+        requested_up = np.array([geo.up_vec_x, geo.up_vec_y, geo.up_vec_z], dtype=np.float64)
+        view_dir_np  = np.array([geo.view_dir_x, geo.view_dir_y, geo.view_dir_z], dtype=np.float64)
+        view_dir_np /= np.linalg.norm(view_dir_np)
+        requested_up_perp = requested_up - np.dot(requested_up, view_dir_np) * view_dir_np
+        requested_up_perp /= np.linalg.norm(requested_up_perp)
+        realized_up = np.array(dd_device.device_from_camera3d @ ddgeo.vector(0, -1, 0))
+        realized_up /= np.linalg.norm(realized_up)
+        needs_180_correction = np.dot(realized_up, requested_up_perp) < 0
+
         # 4. Render
         logger.debug("[DeepDRR] Initialising projector ...")
         with deepdrr.Projector(
             ct_volume,
             device  = dd_device,
-            neglog  = True,     # return attenuation (-log T): air=dark, bone=bright
+            neglog  = True,
+            max_mesh_hits = 8,
         ) as projector:
-            image_np = projector()  # (W, H) float32
+            image_np = projector()
 
-        # DeepDRR returns the image in (W, H) order where W is Patient Left and H is Inferior.
-        # Transpose to (H, W) and flip both axes so Row 0 is Superior (Head at top) 
-        # and Col 0 is Patient Right (Standard AP view).
-        image_np = np.flip(image_np.T, axis=(0, 1)).copy()
+        # 5. Post-process
+        if needs_180_correction:
+            logger.debug(
+                "[DeepDRR] Correcting for SimpleDevice.set_view's antiparallel-up "
+                "bug (view=%s, up=%s) with a 180-degree in-plane rotation.",
+                view_dir_np.tolist(), requested_up.tolist(),
+            )
+            image_np = image_np[::-1, ::-1]
 
-        # 5. Normalise and return
-        lo, hi = float(image_np.min()), float(image_np.max())
-        image_np = (image_np - lo) / (hi - lo + 1e-8)
+        # Convert to contiguous Numpy array
+        image_np = np.ascontiguousarray(image_np)
 
+        # Convert to Pytorch tensor
         drr_tensor = (
             torch.from_numpy(image_np)
             .float()
@@ -171,9 +178,6 @@ def generate_deepdrr_drr(
             .unsqueeze(0)
             .to(device)
         )
-        
-        # Flip horizontally to match Monte Carlo, DVR, and DiffDRR
-        drr_tensor = torch.flip(drr_tensor, dims=[-1])
         
         return drr_tensor
 

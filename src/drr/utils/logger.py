@@ -32,9 +32,9 @@ def get_logger(name: str) -> logging.Logger:
     Return a named logger instance.
 
     Args:
-        name (str): Logger name, typically ``__name__`` of the calling module.
+        name (str): The logger's name — normally just ``__name__``.
 
     Returns:
-        logging.Logger: Configured logger instance.
+        logging.Logger: A ready-to-use logger.
     """
     return logging.getLogger(name)

@@ -1,11 +1,11 @@
-"""Monte Carlo X-ray simulator (Ground Truth reference)."""
+"""Monte Carlo X-ray simulator."""
 
 from __future__ import annotations
 
 import numpy as np
 import torch
 
-from utils.logger import get_logger
+from drr.utils.logger import get_logger
 from .config import GeometryConfig, DEFAULT_GEOMETRY
 
 
@@ -23,11 +23,8 @@ _ENERGY_BINS_KEV = np.array(
     dtype=np.float64,
 )
 
-# 80 kVp tungsten-anode spectrum, 2 mm Al + 0.3 mm Cu filtration.
-# Relative photon fluence weights per energy bin (unitless, sum→1 after norm).
-# Derived from the Kramers–Bohlin model + characteristic lines at 59.3 keV
-# (Kα) and 67.2 keV (Kβ) + filtration via the exponential transmission
-# coefficients for Al and Cu at each energy.
+# Relative photon count per energy bin for an 80 kVp X-ray tube (tungsten anode, 2mm Al + 0.3mm Cu filtration). 
+# Not measured — modeled from the standard bremsstrahlung + characteristic-line + filtration equations.
 _SPECTRUM_WEIGHTS_RAW = np.array(
     [0.008, 0.032, 0.072, 0.120, 0.158, 0.175, 0.175, 0.160,
      0.155, 0.093, 0.085, 0.070],
@@ -54,7 +51,7 @@ _MU_RHO_BONE = np.array(
 _RHO_WATER = 1.00   # soft tissue proxy
 _RHO_BONE  = 1.92   # ICRU-44 cortical bone
 
-# Linear attenuation μ (cm⁻¹) = μ/ρ × ρ, then converted to mm⁻¹.
+# Linear attenuation μ (cm⁻¹) = (μ/ρ) · ρ, then converted to mm⁻¹.
 _MU_TISSUE_MM = (_MU_RHO_WATER * _RHO_WATER) / 10.0  # mm⁻¹
 _MU_BONE_MM   = (_MU_RHO_BONE  * _RHO_BONE)  / 10.0  # mm⁻¹
 
@@ -63,11 +60,11 @@ def _spectrum_weights() -> np.ndarray:
     """
     Return normalised weights for 80 kVp tungsten-anode spectrum.
 
-    Weights are derived from Kramers–Bohlin bremsstrahlung model,
-    characteristic lines (Kα, Kβ), and filtration via 2 mm Al + 0.3 mm Cu.
+    Weights are derived from the Kramers–Bohlin bremsstrahlung model,
+    characteristic lines (Kα, Kβ), and 2 mm Al + 0.3 mm Cu filtration.
 
     Returns:
-        np.ndarray: Normalised spectrum weights, shape (12,), sum = 1.0.
+        np.ndarray: One weight per energy bin, summing to 1.
     """
     w = _SPECTRUM_WEIGHTS_RAW.copy()
     w /= w.sum()
@@ -87,19 +84,17 @@ def _build_detector_pixels(
     """
     Construct cone-beam geometry: source and detector pixel positions.
 
-    Detector is placed at distance ``SDD – SAD`` from isocenter along view_dir,
-    matching the geometry of DiffDRR and Plastimatch renderers.
+    Detector is placed at distance ``SDD – SAD`` from isocenter along
+    `geo.view_dir`, matching DiffDRR/Plastimatch's geometry.
 
     Args:
-        image_size (int): Square detector resolution in pixels.
-        voxel_spacing (float): Isotropic voxel spacing in mm (sets FOV).
+        image_size (int): Detector resolution (square).
+        voxel_spacing (float): Voxel size in mm; sets the field of view with `ct_size`.
         ct_size (int): CT volume side length in voxels.
-        geo (GeometryConfig): Geometry configuration with SDD, SAD, etc.
+        geo (GeometryConfig): X-ray setup (SDD, SAD, isocenter, etc).
 
     Returns:
-        tuple[np.ndarray, np.ndarray]: (source_pos, pixel_pos) where
-            source_pos shape (3,) is world-space source position (mm),
-            pixel_pos shape (H, W, 3) are world-space detector pixels (mm).
+        tuple[np.ndarray, np.ndarray]: Source position and detector pixel positions, in mm.
     """
     view  = np.array([geo.view_dir_x, geo.view_dir_y, geo.view_dir_z], dtype=np.float64)
     up    = np.array([geo.up_vec_x,   geo.up_vec_y,   geo.up_vec_z],   dtype=np.float64)
@@ -153,21 +148,23 @@ def _march_primary(
     """
     Compute Beer-Lambert transmission map for one energy bin via ray marching.
 
-    The effective linear attenuation μ_eff at each sample point is obtained by
-    blending soft-tissue and bone μ values according to local density:
-    μ_eff = density * μ_bone_e + (1 − density) * μ_tissue_e.
+    At each sample point, μ_eff blends soft-tissue and bone μ by local density: 
+    ``μ_eff = density * (density * μ_bone_e + (1 − density) * μ_tissue_e)``.
+    The outer `density *` factor (beyond the density/(1-density) blend itself)
+    zeroes out μ_eff at density=0 (air) even though μ_tissue_e alone is
+    nonzero — see the comment at the call site for why.
 
     Args:
-        vol_np (np.ndarray): Volume density, shape (D, H_vol, W_vol), [0, 1].
-        voxel_spacing (float): Isotropic voxel spacing in mm.
-        source_pos (np.ndarray): World-space X-ray source, shape (3,) in mm.
-        pixel_pos (np.ndarray): World-space detector pixels, shape (H, W, 3) in mm.
-        mu_tissue_e (float): Soft-tissue linear attenuation in mm⁻¹ at energy e.
-        mu_bone_e (float): Cortical-bone linear attenuation in mm⁻¹ at energy e.
-        n_pts (int): Number of sample points per ray.
+        vol_np (np.ndarray): The CT density volume, values in [0, 1].
+        voxel_spacing (float): Voxel size in mm.
+        source_pos (np.ndarray): World-space X-ray source position, in mm.
+        pixel_pos (np.ndarray): World-space position of every detector pixel, in mm.
+        mu_tissue_e (float): Soft-tissue attenuation at this energy bin (mm⁻¹).
+        mu_bone_e (float): Bone attenuation at this energy bin (mm⁻¹).
+        n_pts (int): Sample points to march along each ray.
 
     Returns:
-        np.ndarray: Transmission map exp(-∫ μ dl), shape (H, W), values [0, 1].
+        np.ndarray: Transmission image (fraction of beam getting through), in [0, 1].
     """
     D, H_vol, W_vol = vol_np.shape
     H, W            = pixel_pos.shape[:2]
@@ -191,12 +188,17 @@ def _march_primary(
         iy = np.round(vox[..., 1]).astype(np.int32)
         iz = np.round(vox[..., 2]).astype(np.int32)
 
+        # Track which samples actually fall inside the volume before clipping,
+        # so out-of-bounds rays contribute zero attenuation instead of
+        # sampling the nearest edge voxel.
         inside = (
             (ix >= 0) & (ix < D)
             & (iy >= 0) & (iy < H_vol)
             & (iz >= 0) & (iz < W_vol)
         )
 
+        # Clip so the (now-masked) out-of-bounds indices are still valid for
+        # the fancy-indexing lookup below.
         ix = np.clip(ix, 0, D - 1)
         iy = np.clip(iy, 0, H_vol - 1)
         iz = np.clip(iz, 0, W_vol - 1)
@@ -214,7 +216,7 @@ def _march_primary(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Public rendering entry-point
+# Main entry point: Monte Carlo DRR generator
 # ═════════════════════════════════════════════════════════════════════════════
 
 def generate_mc_drr(
@@ -231,39 +233,23 @@ def generate_mc_drr(
     seed: int = 42,
 ) -> torch.Tensor | None:
     """
-    Generate a Ground Truth DRR via polychromatic CPU-based Monte Carlo simulation.
-
-    Models the dominant physics of real MC codes: beam-hardening (80 kVp tungsten
-    spectrum), energy-dependent attenuation (NIST XCOM for soft-tissue and bone),
-    first-order Compton scatter (Gaussian blur kernel), and optional Poisson
-    quantum noise. Fully deterministic, no GPU required; always available as
-    physics-based reference alongside DeepDRR.
+    Generate a physics-informed reference DRR (NOT ground truth) via deterministic polychromatic ray-marching.
 
     Args:
-        volume_tensor (torch.Tensor): CT density volume ``(1, 1, D, H, W)``
-            normalised to ``[0, 1]``.
-        voxel_spacing (float): Isotropic voxel spacing in mm.
-        image_size (int): Square output DRR resolution in pixels.
-        device (torch.device): Target device for output tensor.
-        geometry (GeometryConfig): X-ray geometry config; uses DEFAULT_GEOMETRY
-            if None.
-        n_pts (int): Number of ray marching samples per ray (default: 128).
-            Higher values → higher accuracy but slower compute.
-        add_quantum_noise (bool): If True, apply Poisson photon noise
-            (default: False).
-        n_photons (float): Open-beam photon count for noise model
-            (default: 1e5). Used only when add_quantum_noise=True.
-        scatter_fraction (float): Fraction of primary fluence to add as scatter;
-            typical clinical scatter-to-primary ratio ≈ 0.10–0.20
-            (default: 0.12).
-        scatter_sigma_px (float): Standard deviation of Gaussian scatter kernel
-            in pixels; larger values → more diffuse scatter (default: 8).
-        seed (int): Random number generator seed for Poisson noise reproducibility
-            (default: 42).
+        volume_tensor (torch.Tensor): The CT density volume, in [0, 1].
+        voxel_spacing (float): The voxel size in mm.
+        image_size (int): The output resolution in pixels.
+        device (torch.device): Where to put the returned tensor.
+        geometry (GeometryConfig): X-ray setup; defaults to ``DEFAULT_GEOMETRY``.
+        n_pts (int): The number of samples per ray — more is slower but more accurate.
+        add_quantum_noise (bool): Whether to add Poisson photon noise.
+        n_photons (float): The number of photons per pixel for the Poisson noise model.
+        scatter_fraction (float): The fraction of the primary beam that is Compton-scattered and reaches the detector.
+        scatter_sigma_px (float): The blur radius of the scatter, in pixels — larger is more diffuse.
+        seed (int): The random seed, for reproducible noise.
 
     Returns:
-        torch.Tensor | None: DRR image ``(1, 1, H, W)`` normalised to ``[0, 1]``,
-            or None if scipy.ndimage.gaussian_filter is unavailable.
+        torch.Tensor | None: The rendered DRR normalised to [0, 1].
     """
     try:
         from scipy.ndimage import gaussian_filter
@@ -302,15 +288,14 @@ def generate_mc_drr(
     primary = primary.astype(np.float32)
 
     # 3. First-order Compton scatter estimation
-    # A Gaussian blur over the attenuated primary approximates the angular
-    # spread of Compton-scattered photons reaching each detector pixel.
+    # A Gaussian blur over the attenuated primary approximates the angular spread of Compton-scattered photons reaching each detector pixel.
     scatter_kernel = gaussian_filter(
         (1.0 - primary) * scatter_fraction,
         sigma=scatter_sigma_px,
     )
     image = primary + scatter_kernel
-    # Convert transmission → attenuation: -log(T) so that bone=bright, air=dark,
-    # matching the polarity of DiffDRR and Plastimatch.
+
+    # Convert transmission → attenuation: -log(T) so that bone is bright and air is dark.
     image = np.clip(image, 1e-6, 1.0)           # avoid log(0) and log(>1)
     image = -np.log(image).astype(np.float32)   # attenuation integral (≥ 0)
 

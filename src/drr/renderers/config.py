@@ -1,16 +1,19 @@
-"""
-Geometry configuration for DRR renderers.
-
-Defines a canonical physical geometry in world coordinates (mm)
-that all renderers must map to, ensuring pixel-perfect alignments.
-"""
+"""Geometry configuration for DRR renderers."""
 
 from dataclasses import dataclass
 
 @dataclass
 class GeometryConfig:
-    sdd: float = 1020.0  # Source-to-Detector Distance in mm
-    sad: float = 850.0   # Source-to-Axis (Isocenter) Distance in mm
+    """
+    Shared physical X-ray geometry.
+    Each renderer takes one of these and converts it into its own coordinate system.
+    """
+
+    # Source-to-Detector Distance in mm
+    sdd: float = 1020.0
+
+    # Source-to-Axis (Isocenter) Distance in mm
+    sad: float = 850.0
     
     # Isocenter position (mm)
     isocenter_x: float = 0.0

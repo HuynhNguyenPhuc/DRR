@@ -10,14 +10,13 @@ def time_fn(fn, device: torch.device, warmup: int = 5, n: int = 20):
     Measure the average wall-clock time of a callable.
 
     Args:
-        fn: Zero-argument callable to time.
-        device (torch.device): Target device (``"cuda"`` or ``"cpu"``).
-        warmup (int): Number of warm-up iterations (default: 5).
-        n (int): Number of timed iterations (default: 20).
+        fn: Function to run and measure.
+        device (torch.device): The device on which the function runs.
+        warmup (int): The number of warmup iterations to ignore for timing.
+        n (int): The number of iterations to time.
 
     Returns:
-        tuple[float, float]: ``(mean_ms, std_ms)`` — mean and standard
-        deviation of per-call latency in milliseconds.
+        tuple[float, float]: Mean and standard deviation, in milliseconds.
     """
     # Warmup the device and the function to get stable timing measurements.
     for _ in range(warmup):
@@ -70,14 +69,12 @@ def peak_vram(fwd_fn, device: torch.device):
     Measure peak VRAM for a forward pass and a forward+backward pass.
 
     Args:
-        fwd_fn: Zero-argument callable that returns model output(s).
-        device (torch.device): Must be a CUDA device; returns ``(0.0, 0.0)``
-            on CPU.
+        fwd_fn: Function to run and measure.
+        device (torch.device): Must be a GPU; always ``(0.0, 0.0)`` on CPU.
 
     Returns:
-        tuple[float, float]: ``(fwd_mb, bwd_mb)`` — peak allocated memory
-        in MiB for the forward pass and for the combined forward+backward
-        pass respectively.
+        tuple[float, float | None]: Peak MB for forward, then forward+backward.
+        Second value is ``None`` if the output isn't differentiable.
     """
     if device.type != "cuda":
         return 0.0, 0.0
@@ -89,11 +86,17 @@ def peak_vram(fwd_fn, device: torch.device):
     # Run the forward pass.
     out = fwd_fn()
 
-    # Synchronize to ensure all GPU operations have completed before measuring memory usage.    
+    # Synchronize to ensure all GPU operations have completed before measuring memory usage.
     torch.cuda.synchronize()
 
     # Measure peak memory allocated during the forward pass.
     fwd_mb = torch.cuda.max_memory_allocated() / 1024 ** 2
+
+    # Non-differentiable outputs cannot be backpropagated, so we skip the backward pass in that case.
+    out_check = out[0] if isinstance(out, (list, tuple)) else out
+    if not (isinstance(out_check, torch.Tensor) and out_check.requires_grad):
+        del out
+        return fwd_mb, None
 
     del out
     torch.cuda.empty_cache()

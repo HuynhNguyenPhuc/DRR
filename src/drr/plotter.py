@@ -1,17 +1,16 @@
-"""
-Plotting and terminal summary utilities for benchmark results.
-
-This module provides functions to visualize speed and VRAM measurements,
-as well as a utility to print a formatted summary of all benchmarks.
-"""
+"""Plotting and terminal summary utilities for benchmark results."""
 
 import numpy as np
+
 import matplotlib
 matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 
-from utils.logger import get_logger
+from drr.utils.logger import get_logger
 
+
+# --- Logger --- #
 logger = get_logger(__name__)
 
 
@@ -19,12 +18,12 @@ logger = get_logger(__name__)
 
 def plot_speed(speed_results: dict, out_dir) -> None:
     """
-    Save a grouped bar chart of rendering latency vs image resolution.
+    Saves a grouped bar chart of render latency vs. resolution, one group
+    of bars per renderer.
 
     Args:
-        speed_results (dict): Output from :func:`tasks.run_speed`.
-        out_dir (pathlib.Path): Destination directory for
-            ``speed_comparison.png``.
+        speed_results: Output of ``benchmarks.run_speed``.
+        out_dir: Folder to save ``speed_comparison.png`` into.
     """
     dvr_data    = speed_results.get("dvr",     {})
     ddrr_data   = speed_results.get("diffdrr", {})
@@ -70,12 +69,12 @@ def plot_speed(speed_results: dict, out_dir) -> None:
 
 def plot_vram(vram_results: dict, out_dir) -> None:
     """
-    Save a dual bar chart of peak VRAM usage (forward and backward passes).
+    Saves a side-by-side bar chart of peak VRAM usage — one panel for the
+    forward pass, one for forward+backward.
 
     Args:
-        vram_results (dict): Output from :func:`tasks.run_vram`.
-        out_dir (pathlib.Path): Destination directory for
-            ``vram_comparison.png``.
+        vram_results: Output of ``benchmarks.run_vram``.
+        out_dir: Folder to save ``vram_comparison.png`` into.
     """
     dvr_data    = vram_results.get("dvr",     {})
     ddrr_data   = vram_results.get("diffdrr", {})
@@ -123,11 +122,11 @@ def plot_vram(vram_results: dict, out_dir) -> None:
 
 def print_summary(results: dict) -> None:
     """
-    Print a formatted summary table to the console.
+    Logs a formatted summary table for each benchmark that ran.
 
     Args:
-        results (dict): Top-level results dict with optional keys
-            ``"speed"``, ``"vram"``, ``"quality"``, ``"optimization"``.
+        results: Combined results dict, keyed by ``"speed"``, ``"vram"``,
+            ``"quality"``, ``"optimization"``; missing keys are skipped.
     """
     logger.info("")
     logger.info("=" * 64)
@@ -180,7 +179,7 @@ def print_summary(results: dict) -> None:
         logger.info("  %s  %s  %s  %s  ---",
                     "-" * 22, "-" * 10, "-" * 10, "-" * 8)
         for name, vals in quality.items():
-            # vals may be a flat dict (legacy) or a nested dict keyed by GT name
+            # vals is either a flat dict or nested, keyed by reference name
             if isinstance(vals, dict) and any(
                 isinstance(v, dict) for v in vals.values()
             ):

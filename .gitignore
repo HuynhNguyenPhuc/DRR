@@ -1,3 +1,9 @@
+### Coding Agents ###
+.claude
+
+### Project ###
+benchmark_results/
+
 ### Python ###
 # Byte-compiled / optimized / DLL files
 __pycache__/

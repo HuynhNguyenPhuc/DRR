@@ -1,64 +1,64 @@
-"""
-Data loading utilities for CT volumes.
-
-This module provides functions to load CT volumes from NIfTI files, 
-use built-in example data from DiffDRR, or generate synthetic phantoms.
-"""
+"""Data loading utilities for CT volumes."""
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from utils.logger import get_logger
+from drr.utils.logger import get_logger
 
+
+# --- Logger -- #
 logger = get_logger(__name__)
 
 
 def load_ct_volume(ct_path: str | None = None, target_size: int = 128):
     """
-    Load or generate a CT density volume.
-
-    Attempts sources in priority order:
-
-    1. NIfTI file at *ct_path* (requires *nibabel*).
-    2. DiffDRR built-in example chest CT.
-    3. Synthetic spherical phantom (always succeeds).
-
-    The returned tensor is resampled to ``target_size³`` and clamped to
-    ``[0, 1]``.
+    Loads a CT density volume, falling back through three sources — a NIfTI
+    file, then DiffDRR's example chest CT, then a synthetic phantom — until
+    one succeeds.
 
     Args:
-        ct_path (str | None): Path to a ``.nii`` / ``.nii.gz`` file.
-            Pass ``None`` to skip and fall through to the next source.
-        target_size (int): Target isotropic voxel grid side length
-            (default: 128).
+        ct_path: Path to a NIfTI file to load (requires nibabel), or ``None`` to skip straight to the built-in sources.
+        target_size: Cube side length, in voxels, to resample the volume to.
 
     Returns:
-        tuple:
-            - **volume_tensor** (torch.Tensor): Shape ``(1, 1, D, H, W)``.
-            - **subject**: torchio ``Subject`` returned by
-              ``diffdrr.data.load_example_ct``, or ``None`` when the
-              example CT was not used.
-            - **voxel_spacing** (float): Isotropic voxel size in mm.
+        result: Volume tensor clamped to ``[0, 1]``, a torchio ``Subject``
+            (``None`` unless the DiffDRR example CT was used), and voxel
+            spacing in mm.
     """
     subject = None
     volume_tensor = None
     voxel_spacing = 2.0
+    # Real-world side length (mm), kept so voxel_spacing can be recomputed
+    # after resampling below instead of going stale.
+    physical_size_mm = None
 
     # ── Source 1: User-supplied NIfTI ────────────────────────────────────────
     if ct_path is not None:
         try:
             import nibabel as nib
-            
-            img  = nib.load(ct_path)
-            data = torch.tensor(img.get_fdata(), dtype=torch.float32)
-            
+
+            img   = nib.load(ct_path)
+            zooms = img.header.get_zooms()[:3]  # (mm/voxel) per axis
+            data  = torch.tensor(img.get_fdata(), dtype=torch.float32)
+
             # Normalize to [0, 1]
             data = (data - data.min()) / (data.max() - data.min() + 1e-8)
             volume_tensor = data.unsqueeze(0).unsqueeze(0)
-            
-            logger.info("[DATA] Loaded CT from: %s", ct_path)
-            
+
+            # Downstream code assumes one isotropic spacing — approximate
+            # anisotropic scans with their mean per-axis spacing.
+            spacing_mean = float(np.mean(zooms))
+            if zooms and max(zooms) / min(zooms) > 1.05:
+                logger.warning(
+                    "[DATA] Anisotropic voxel spacing %s mm — approximating as isotropic %.3f mm.",
+                    tuple(round(float(z), 3) for z in zooms), spacing_mean,
+                )
+            voxel_spacing    = spacing_mean
+            physical_size_mm = spacing_mean * float(volume_tensor.shape[2])
+
+            logger.info("[DATA] Loaded CT from: %s  (spacing=%.3fmm)", ct_path, voxel_spacing)
+
         except Exception as exc:
             logger.warning("[DATA] Could not load %s: %s", ct_path, exc)
 
@@ -66,14 +66,27 @@ def load_ct_volume(ct_path: str | None = None, target_size: int = 128):
     if volume_tensor is None:
         try:
             from diffdrr.data import load_example_ct
-            
+
             logger.info("[DATA] Loading DiffDRR example chest CT ...")
             subject = load_example_ct(bone_attenuation_multiplier=1.0)
             dens    = subject.density.data.float()
             volume_tensor = dens.unsqueeze(0)
-            
-            logger.info("[DATA] Original shape: %s", tuple(volume_tensor.shape))
-            
+
+            zooms        = tuple(float(s) for s in subject.density.spacing)
+            spacing_mean = float(np.mean(zooms))
+            if max(zooms) / min(zooms) > 1.05:
+                logger.warning(
+                    "[DATA] Anisotropic voxel spacing %s mm — approximating as isotropic %.3f mm.",
+                    tuple(round(z, 3) for z in zooms), spacing_mean,
+                )
+            voxel_spacing    = spacing_mean
+            physical_size_mm = spacing_mean * float(volume_tensor.shape[2])
+
+            logger.info(
+                "[DATA] Original shape: %s  (spacing=%.3fmm)",
+                tuple(volume_tensor.shape), voxel_spacing,
+            )
+
         except Exception as exc:
             logger.warning("[DATA] DiffDRR load_example_ct failed: %s", exc)
 
@@ -100,7 +113,14 @@ def load_ct_volume(ct_path: str | None = None, target_size: int = 128):
         )
         subject = None  # Force recreation with the new tensor and spacing
 
-    # Clamp the values to [0, 1] range to avoid physically impossible densities
+        # Resampling changes voxel count but not real-world size, so
+        # voxel_spacing must scale to match, or every renderer's field of
+        # view would use stale spacing.
+        if physical_size_mm is not None:
+            voxel_spacing = physical_size_mm / target_size
+            logger.info("[DATA] Adjusted voxel spacing after resample: %.3fmm", voxel_spacing)
+
+    # Clamp to [0, 1] — densities outside that range aren't physical.
     volume_tensor = volume_tensor.clamp(0.0, 1.0)
     
     logger.info(
@@ -115,26 +135,25 @@ def load_ct_volume(ct_path: str | None = None, target_size: int = 128):
 
 def make_diffdrr_subject(volume_tensor: torch.Tensor, voxel_spacing: float = 2.0):
     """
-    Wrap a raw density tensor in a torchio Subject for DiffDRR.
-
-    Constructs a world-space affine that centres the volume at the origin
-    with isotropic spacing *voxel_spacing*.
+    Wraps a raw density tensor in a torchio ``Subject`` DiffDRR can render,
+    with a world-space affine that centers the volume at the origin.
 
     Args:
-        volume_tensor (torch.Tensor): Shape ``(1, 1, D, H, W)`` or
-            ``(1, D, H, W)``.
-        voxel_spacing (float): Isotropic voxel size in mm (default: 2.0).
+        volume_tensor: CT density volume to wrap.
+        voxel_spacing: Isotropic voxel size, in mm.
 
     Returns:
-        torchio.Subject | None: Canonicalised subject, or ``None`` when
-        *torchio* or *diffdrr* are not installed.
+        subject: A ready-to-render torchio ``Subject``, or ``None`` if
+            torchio/diffdrr aren't installed.
     """
+    # torchio/diffdrr are optional — return None instead of raising if missing.
     try:
         import torchio
         from diffdrr.data import canonicalize
     except ImportError:
         return None
 
+    # ── World-space affine centring the volume at the origin ───────────────
     D      = volume_tensor.shape[2]
     sp     = float(voxel_spacing)
     offset = -(D * sp / 2.0)
@@ -145,15 +164,16 @@ def make_diffdrr_subject(volume_tensor: torch.Tensor, voxel_spacing: float = 2.0
          [0,  0,  0,  1.0   ]],
         dtype=np.float64,
     )
+
     dens_4d     = volume_tensor.squeeze(0)
     img_np      = dens_4d.cpu().numpy()
     scalar_img  = torchio.ScalarImage(tensor=img_np, affine=affine)
-    # DRR.__init__ reads subject.density.data; for our phantom the volume is
-    # already normalised [0,1] so density == volume.
+    # DRR.__init__ reads subject.density.data; the volume is already
+    # normalised [0,1], so density == volume.
     density_img = torchio.ScalarImage(tensor=img_np, affine=affine)
 
-    # AP reorient matrix — same 4×4 produced by DiffDRR's read(orientation="AP").
-    # Rotates the C-arm about the x-axis by 90° so the detector faces the AP direction.
+    # AP reorient matrix — rotates the C-arm 90° about the x-axis so the
+    # detector faces the AP direction.
     reorient = torch.tensor(
         [[1, 0,  0, 0],
          [0, 0, -1, 0],
@@ -162,14 +182,12 @@ def make_diffdrr_subject(volume_tensor: torch.Tensor, voxel_spacing: float = 2.0
         dtype=torch.float32,
     )
 
-    # TorchIO Subject may silently drop non-Image kwargs (None, plain tensors,
-    # strings) depending on the installed version.  Create the Subject with
-    # only the two Image entries that are unconditionally stored, then attach
-    # every non-Image attribute directly to the instance so that Python's
-    # __getattribute__ (which checks instance.__dict__ first) finds them
-    # before __getattr__ ever looks inside the dict.
+    # torchio.Subject can silently drop non-Image kwargs depending on the
+    # version installed — build it with just the two Image entries, then
+    # set the rest as plain attributes afterward.
     sub = torchio.Subject(volume=scalar_img, density=density_img)
     sub.mask      = None     # DRR.__init__: `if subject.mask is not None`
     sub.fiducials = None     # canonicalize(): `if subject.fiducials is not None`
     sub.reorient  = reorient # DRR.__init__: passed to Detector
+    
     return canonicalize(sub)

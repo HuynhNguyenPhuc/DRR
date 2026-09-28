@@ -5,17 +5,16 @@ import torch
 
 def zncc_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
-    Compute the batch-averaged negative Zero-Normalised Cross-Correlation.
-
-    ZNCC ∈ [-1, 1]; this returns the *negated* value so it can be minimised
-    by a gradient-descent optimiser.
+    Compute the Zero-mean Normalised Cross-Correlation (ZNCC) loss between two images.
+    ZNCC is in the range [-1, 1], where 1 indicates perfect correlation and -1 indicates perfect anti-correlation.
+    This implementation computes the negative ZNCC, so that it can be minimised by a gradient-descent optimiser. 
 
     Args:
-        a (torch.Tensor): Predicted image, shape ``(B, *)``.
-        b (torch.Tensor): Reference image, shape ``(B, *)``.
+        a (torch.Tensor): The rendered image.
+        b (torch.Tensor): The target image to compare against.
 
     Returns:
-        torch.Tensor: Scalar loss value (differentiable).
+        torch.Tensor: The mean negative ZNCC loss across the batch.
     """
     # Reshape to (B, N) and convert to float for numerical stability.
     a = a.reshape(a.shape[0], -1).float()

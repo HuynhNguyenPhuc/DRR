@@ -12,6 +12,7 @@ try:
         NDCMultinomialRaysampler,
         EmissionAbsorptionRaymarcher,
     )
+    from pytorch3d.renderer.cameras import PerspectiveCameras
     from pytorch3d.renderer.implicit.raymarching import (
         _check_density_bounds,
         _check_raymarcher_inputs,
@@ -22,7 +23,7 @@ try:
 except ImportError:
     _PYTORCH3D_AVAILABLE = False
 
-from utils.logger import get_logger
+from drr.utils.logger import get_logger
 from .config import GeometryConfig, DEFAULT_GEOMETRY
 
 
@@ -35,27 +36,22 @@ logger = get_logger(__name__)
 # ═════════════════════════════════════════════════════════════════════════════
 
 def minimized(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """
-    Scale tensor to (0, 1] by dividing by its maximum value.
-    """
+    """Scale tensor to (0, 1] by dividing by its maximum value."""
     return (x + eps) / (x.max() + eps)
 
 
 def normalized(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """
-    Min-max normalise tensor to [0, 1].
-    """
+    """Min-max normalise tensor to [0, 1]."""
     return (x - x.min() + eps) / (x.max() - x.min() + eps)
 
 
 def standardized(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """
-    Standardise tensor to zero mean and unit variance.
-    """
+    """Standardise tensor to zero mean and unit variance."""
     return (x - x.mean()) / (x.std() + eps)
 
 
 def _require_pytorch3d():
+    """Raise an ImportError if pytorch3d isn't installed."""
     if not _PYTORCH3D_AVAILABLE:
         raise ImportError(
             "pytorch3d is required for the DVR renderer. "
@@ -67,14 +63,14 @@ def _require_pytorch3d():
 # Custom Raymarcher
 # ═════════════════════════════════════════════════════════════════════════════
 
-class ExactXRayRaymarcher(nn.Module):
-    """
-    True Beer-Lambert Line Integral Raymarcher.
-    Outputs absolute attenuation values matching DiffDRR and Plastimatch.
-    """
-    def __init__(self, step_size: float):
-        super().__init__()
-        self.step_size = step_size
+class AbsorptionEmissionRaymarcher(EmissionAbsorptionRaymarcher if _PYTORCH3D_AVAILABLE else object):
+    """Custom absorption-emission raymarcher for X-Ray volume rendering."""
+
+    def __init__(self, *args, **kwargs):
+        # Check for PyTorch3D availability.
+        _require_pytorch3d()
+
+        super().__init__(*args, **kwargs)
 
     def forward(
         self,
@@ -84,22 +80,47 @@ class ExactXRayRaymarcher(nn.Module):
         **kwargs,
     ) -> torch.Tensor:
         """
-        rays_densities: (batch, num_rays, num_samples, 1)
+        Raymarch each ray back-to-front instead of PyTorch3D's default front-to-back.
+        It better matches how X-rays actually attenuate.
+
+        Args:
+            rays_densities: Density at each sample point along each ray, in ``[0, 1]``.
+            rays_features: Feature value at each sample point.
+            eps: The tiny constant to avoid dividing by (near-)zero transmittance.
+
+        Returns:
+            Tensor: Integrated feature per ray, with final opacity appended as the last channel.
         """
-        # X-ray physics: Simply integrate the attenuation coefficients along the ray.
-        # No cumprod, no exponentials, no 1.0 - prod(). 
-        # Just the sum of densities multiplied by the physical step size.
-        
-        ray_integrals = torch.sum(rays_densities, dim=-2) * self.step_size
-        
-        # PyTorch3D renderers expect output of shape (batch, num_rays, feature_dim + 1)
-        # We will duplicate the integral into the RGB channels (features) and Opacity channel
-        return torch.cat((ray_integrals, ray_integrals[..., :1]), dim=-1)
+        # Ensure inputs are valid and compatible.
+        _check_raymarcher_inputs(
+            rays_densities, rays_features, None,
+            z_can_be_none=True,
+            features_can_be_none=False,
+            density_1d=True,
+        )
+
+        # Ensure densities are in [0, 1] for physical plausibility.
+        _check_density_bounds(rays_densities)
+
+        rays_densities = rays_densities[..., 0]
+
+        # Reverse direction: compute absorption from the end of the ray backwards.
+        absorption = _shifted_cumprod(
+            (1.0 + eps) - rays_densities.flip(dims=(-1,)),
+            shift=-self.surface_thickness,
+        ).flip(dims=(-1,))
+
+        # Compute features and opacities along the ray.
+        weights  = rays_densities * absorption
+        features = (weights[..., None] * rays_features).sum(dim=-2)
+        opacities = 1.0 - torch.prod(1.0 - rays_densities, dim=-1, keepdim=True)
+
+        return torch.cat((features, opacities), dim=-1)
 
 
 # Aliases
-ScreenCentricRaymarcher = ExactXRayRaymarcher
-ObjectCentricRaymarcher = ExactXRayRaymarcher
+ScreenCentricRaymarcher = AbsorptionEmissionRaymarcher
+ObjectCentricRaymarcher = EmissionAbsorptionRaymarcher if _PYTORCH3D_AVAILABLE else None
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -122,7 +143,20 @@ class BaseXRayVolumeRenderer(nn.Module):
         max_depth: float = 9.0,
         ndc_extent: float = 1.0,
     ):
+        """
+        Store ray-sampling parameters shared by all subclasses.
+
+        Args:
+            image_width: The output image width, in pixels.
+            image_height: The output image height, in pixels.
+            n_pts_per_ray: The number of samples taken along each ray.
+            min_depth: The near clipping distance, in NDC-scaled units.
+            max_depth: The far clipping distance, same units as `min_depth`.
+            ndc_extent: The half-width of the volume's bounding cube in NDC space.
+        """
+        # Check for PyTorch3D availability.
         _require_pytorch3d()
+
         super().__init__()
 
         self.image_width   = image_width
@@ -133,12 +167,15 @@ class BaseXRayVolumeRenderer(nn.Module):
         self.ndc_extent    = ndc_extent
 
     def _create_raysampler(self):
+        """Return the PyTorch3D raysampler to use. Overridden by subclasses."""
         raise NotImplementedError
 
     def _create_raymarcher(self):
+        """Return the PyTorch3D raymarcher to use. Overridden by subclasses."""
         raise NotImplementedError
 
     def _setup_renderer(self):
+        """Build ``self.renderer`` from the subclass's raysampler/raymarcher."""
         self.renderer = VolumeRenderer(
             raysampler=self._create_raysampler(),
             raymarcher=self._create_raymarcher(),
@@ -149,7 +186,7 @@ class BaseXRayVolumeRenderer(nn.Module):
         volume: torch.Tensor,
         cameras,
         opacity: torch.Tensor | None = None,
-        norm_type: str = None,
+        norm_type: str = "standardized",
         scaling_factor: float = 1.0,
         is_grayscale: bool = True,
         return_bundle: bool = False,
@@ -159,19 +196,16 @@ class BaseXRayVolumeRenderer(nn.Module):
         Render X-ray images from the input volume.
 
         Args:
-            volume: ``(B, C, D, H, W)`` density tensor, values in ``[0, 1]``.
-            cameras: PyTorch3D cameras object defining the viewpoint(s).
-            opacity: Optional ``(B, 1, D, H, W)`` opacity override.
-            norm_type: Must be None for physically exact line integrals.
-            scaling_factor: Multiplier applied to densities.
-            is_grayscale: If ``True`` the three RGB channels are averaged
-                before returning.
-            return_bundle: If ``True`` also return the rendering bundle.
-            stratified_sampling: Unused (kept for API compatibility).
+            volume: The density volume, values in ``[0, 1]``.
+            cameras: List of PyTorch3D cameras objects defining the viewpoint(s).
+            opacity: The separate opacity volume, if it differs from `volume`.
+            norm_type: The output normalisation — ``"minimized"``, ``"normalized"``, ``"standardized"``, or ``None``.
+            scaling_factor: The multiplier applied to densities before rendering.
+            is_grayscale: Whether to average the RGB channels into one.
+            return_bundle: Whether to also return PyTorch3D's rendering bundle.
 
         Returns:
-            Rendered image ``(B, 1, H, W)`` (grayscale) or ``(B, 3, H, W)``,
-            optionally followed by the rendering bundle.
+            The rendered image (grayscale or RGB), optionally followed by the rendering bundle.
         """
         # Expand single-channel volume to 3 feature channels expected by VolumeRenderer
         features  = volume.repeat(1, 3, 1, 1, 1) if volume.shape[1] == 1 else volume
@@ -179,7 +213,7 @@ class BaseXRayVolumeRenderer(nn.Module):
         densities = (
             opacity * scaling_factor
             if opacity is not None
-            else volume[:, [0]] * scaling_factor
+            else torch.ones_like(volume[:, [0]]) * scaling_factor
         )
         
         # PyTorch3D grid_sample maps the last dimension (W) to X, middle (H) to Y, first (D) to Z.
@@ -197,32 +231,32 @@ class BaseXRayVolumeRenderer(nn.Module):
         screen_RGBA, bundle = self.renderer(cameras=cameras, volumes=volumes)
         screen_RGBA = screen_RGBA.permute(0, 3, 1, 2)          # (B, 4, H, W)
 
-        # For X-ray, the true attenuation is the opacity channel (index 3).
-        opacities = screen_RGBA[:, 3:4, :, :]                  # (B, 1, H, W)
-        
-        screen_RGB = (
-            opacities
+        rgb_channels = screen_RGBA[:, :3, :, :]                 # (B, 3, H, W)
+        screen_RGB   = (
+            rgb_channels.mean(dim=1, keepdim=True)
             if is_grayscale
-            else opacities.repeat(1, 3, 1, 1)
+            else rgb_channels
         )
 
-        # Ensure normalization is strictly bypassed
-        if norm_type is not None:
-             raise ValueError("Do not normalize physical X-ray integrals! Set norm_type=None.")
+        if norm_type == "minimized":
+            screen_RGB = minimized(screen_RGB)
+        elif norm_type == "normalized":
+            screen_RGB = normalized(screen_RGB)
+        elif norm_type == "standardized":
+            screen_RGB = normalized(standardized(screen_RGB))
 
         return (screen_RGB, bundle) if return_bundle else screen_RGB
 
 
 class ScreenCentricXRayVolumeRenderer(BaseXRayVolumeRenderer):
-    """
-    Screen-centric renderer — uses ExactXRayRaymarcher.
-    """
+    """Screen-centric renderer — uses EmissionAbsorptionRaymarcher."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._setup_renderer()
 
     def _create_raysampler(self):
+        """Uniform NDC raysampler over the full screen, un-stratified for determinism."""
         return NDCMultinomialRaysampler(
             image_width=self.image_width,
             image_height=self.image_height,
@@ -233,14 +267,14 @@ class ScreenCentricXRayVolumeRenderer(BaseXRayVolumeRenderer):
         )
 
     def _create_raymarcher(self):
-        # Calculate the physical distance between sample points along the ray
-        step_size = (self.max_depth - self.min_depth) / self.n_pts_per_ray
-        return ExactXRayRaymarcher(step_size=step_size)
+        """PyTorch3D's stock front-to-back emission-absorption raymarcher."""
+        return EmissionAbsorptionRaymarcher()
 
 
 class ObjectCentricXRayVolumeRenderer(BaseXRayVolumeRenderer):
-    """
-    Object-centric renderer — uses ExactXRayRaymarcher.
+    """Object-centric renderer — uses AbsorptionEmissionRaymarcher.
+
+    This reverses the integration order so that absorbing structures (e.g., bones) appear bright in the final X-ray image.
     """
 
     def __init__(self, **kwargs):
@@ -248,6 +282,7 @@ class ObjectCentricXRayVolumeRenderer(BaseXRayVolumeRenderer):
         self._setup_renderer()
 
     def _create_raysampler(self):
+        """Uniform NDC raysampler over the full screen, un-stratified for determinism."""
         return NDCMultinomialRaysampler(
             image_width=self.image_width,
             image_height=self.image_height,
@@ -258,16 +293,15 @@ class ObjectCentricXRayVolumeRenderer(BaseXRayVolumeRenderer):
         )
 
     def _create_raymarcher(self):
-        # Calculate the physical distance between sample points along the ray
-        step_size = (self.max_depth - self.min_depth) / self.n_pts_per_ray
-        return ExactXRayRaymarcher(step_size=step_size)
+        """This module's reversed-accumulation raymarcher."""
+        return AbsorptionEmissionRaymarcher()
 
 
 __all__ = [
     "minimized",
     "normalized",
     "standardized",
-    "ExactXRayRaymarcher",
+    "AbsorptionEmissionRaymarcher",
     "ScreenCentricRaymarcher",
     "ObjectCentricRaymarcher",
     "BaseXRayVolumeRenderer",
@@ -282,23 +316,20 @@ def build_dvr_renderer(image_size: int, n_pts: int, ct_size: int, voxel_spacing:
     Matches DiffDRR's physical geometry using screen-space PerspectiveCameras.
 
     Args:
-        image_size (int): Square output image resolution in pixels.
-        n_pts (int): Number of sample points per ray.
-        ct_size (int): Isotropic CT volume side length in voxels.
-        voxel_spacing (float): Isotropic voxel size in mm.
+        image_size (int): Output resolution (square).
+        n_pts (int): Sample points per ray.
+        ct_size (int): CT volume side length in voxels.
+        voxel_spacing (float): Voxel size in mm.
         device (torch.device): Target compute device.
+        geometry (GeometryConfig): X-ray setup; defaults to ``DEFAULT_GEOMETRY``.
 
     Returns:
-        tuple:
-            - **renderer** (ObjectCentricXRayVolumeRenderer | None): Ready-to-use
-              renderer, or ``None`` when the import fails.
-            - **cameras** (PerspectiveCameras | None): Matching camera object,
-              or ``None`` on failure.
+        tuple: Renderer and matching cameras, or ``(None, None)`` if pytorch3d isn't installed.
     """
-    try:
-        from pytorch3d.renderer.cameras import PerspectiveCameras
-    except ImportError as exc:
-        logger.warning("[DVR] Import failed: %s", exc)
+    # PerspectiveCameras is one of the pytorch3d symbols already guarded at
+    # module import time — reuse that flag instead of a separate try/except.
+    if not _PYTORCH3D_AVAILABLE:
+        logger.warning("[DVR] pytorch3d not available.")
         return None, None
 
     geo = geometry or DEFAULT_GEOMETRY
@@ -347,14 +378,18 @@ def build_dvr_renderer(image_size: int, n_pts: int, ct_size: int, voxel_spacing:
     x_cam = x_cam / np.linalg.norm(x_cam)
     y_cam = np.cross(z_cam, x_cam)
 
-    R_np = np.stack([x_cam, y_cam, z_cam], axis=1)
+    # On NumPy >= 2.0, dividing a float32 array by np.linalg.norm(...) silently
+    # upcasts the result to float64, which would make R/T float64 tensors that
+    # don't match the float32 tensors used elsewhere. Cast back to float32
+    # explicitly here rather than relying on numpy to preserve the dtype.
+    R_np = np.stack([x_cam, y_cam, z_cam], axis=1).astype(np.float32)
     R = torch.from_numpy(R_np).to(device)
 
     # 5. Source translation
     # Source S = I - SAD * d. In world NDC, SAD becomes sad_ndc
     I_ndc = np.array([geo.isocenter_x, geo.isocenter_y, geo.isocenter_z], dtype=np.float32) * (2.0 / L)
     S = I_ndc - sad_ndc * d
-    T_np = -S @ R_np
+    T_np = (-S @ R_np).astype(np.float32)
     T = torch.from_numpy(T_np).unsqueeze(0).to(device)
 
     cameras = PerspectiveCameras(
@@ -368,3 +403,4 @@ def build_dvr_renderer(image_size: int, n_pts: int, ct_size: int, voxel_spacing:
     )
 
     return renderer, cameras
+

@@ -1,5 +1,6 @@
-"""Plastimatch ."""
+"""Renderer factory function for Plastimatch."""
 
+import glob
 import os
 import tempfile
 import subprocess
@@ -7,10 +8,13 @@ import subprocess
 import numpy as np
 import torch
 
-from utils.logger import get_logger
+from drr.utils.logger import get_logger
 from .config import GeometryConfig, DEFAULT_GEOMETRY
 
+
+# --- Logger --- #
 logger = get_logger(__name__)
+
 
 def generate_plastimatch_drr(
     volume_tensor: torch.Tensor,
@@ -21,20 +25,18 @@ def generate_plastimatch_drr(
 ) -> torch.Tensor | None:
     """
     Generate a Ground Truth DRR using Plastimatch's exact ray-tracing algorithm.
-    Saves the volume to a temporary file, calls the `plastimatch drr` CLI,
-    and loads the result back as a tensor.
 
     Args:
-        volume_tensor (torch.Tensor): CT density volume ``(1, 1, D, H, W)``.
-        voxel_spacing (float): Voxel size in mm.
-        image_size (int): Output DRR resolution (square).
-        device (torch.device): Device to place the returned tensor on.
+        volume_tensor (torch.Tensor): The CT density volume.
+        voxel_spacing (float): The voxel size in mm.
+        image_size (int): The output resolution in pixels.
+        device (torch.device): Where to put the returned tensor.
+        geometry (GeometryConfig): X-ray setup; defaults to ``DEFAULT_GEOMETRY``.
 
     Returns:
-        torch.Tensor | None: The generated DRR tensor ``(1, 1, H, W)``,
-        or None if Plastimatch/SimpleITK is unavailable or fails.
+        torch.Tensor | None: The rendered DRR normalised to [0, 1], or ``None`` if Plastimatch is not installed or fails.
     """
-    # 1. Check dependencies
+    # 1. Check dependencies (both optional — degrade gracefully instead of raising)
     try:
         subprocess.run(["plastimatch", "--version"], capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
@@ -52,7 +54,8 @@ def generate_plastimatch_drr(
     vol_np = volume_tensor.detach().cpu().squeeze().numpy()  # (D, H, W)
 
     # 3. Create temporary directory
-    with tempfile.TemporaryDirectory() as tmpdir:
+    # Plastimatch requires file I/O for both input and output, so we use a temporary directory to avoid cluttering the filesystem.
+    with tempfile.TemporaryDirectory(dir=os.path.expanduser("~")) as tmpdir:
         in_path = os.path.join(tmpdir, "ct.mha")
         # Plastimatch appends "0000.pfm" to this prefix -> drr0000.pfm
         out_prefix = os.path.join(tmpdir, "drr")
@@ -61,12 +64,13 @@ def generate_plastimatch_drr(
         # Plastimatch's DRR lookup table expects Hounsfield Units (HU).
         # Convert normalised density [0, 1] → HU: 0 = -1000 (air), 1 = +3000 (bone).
         hu_np = (vol_np * 4_000.0 - 1_000.0).astype(np.float32)
+
         # vol_np is (X, Y, Z). SimpleITK GetImageFromArray expects (Z, Y, X) order for 3D numpy arrays.
         hu_np = np.transpose(hu_np, (2, 1, 0))
         image = sitk.GetImageFromArray(hu_np)
         image.SetSpacing([voxel_spacing, voxel_spacing, voxel_spacing])
-        # Center the volume at the world origin so the isocenter (0,0,0) passes
-        # through the volume midpoint — matching DVR, DiffDRR, and MC renderers.
+
+        # Center the volume at the world origin so the isocenter (0,0,0) passes through the volume midpoint.
         # vol_np axes are (X, Y, Z), so shape[0] is X dimension.
         half_x = float(vol_np.shape[0]) * voxel_spacing / 2.0
         half_y = float(vol_np.shape[1]) * voxel_spacing / 2.0
@@ -97,30 +101,34 @@ def generate_plastimatch_drr(
             subprocess.run(cmd, capture_output=True, check=True, text=True)
         except subprocess.CalledProcessError as exc:
             logger.error("[Plastimatch] Command failed:\n%s", exc.stderr)
-            raise RuntimeError(f"Plastimatch command failed:\n{exc.stderr}") from exc
+            return None
 
         # 7. Load DRR image — Plastimatch outputs drr0000.pfm
-        import glob
         generated_files = sorted(glob.glob(out_prefix + "*.pfm"))
         if not generated_files:
             logger.error("[Plastimatch] Output file was not generated.")
-            raise FileNotFoundError("Plastimatch output .pfm file was not generated.")
+            return None
 
         out_path = generated_files[0]
 
-        # Read PFM (Portable FloatMap) manually — SimpleITK does not support pfm
-        with open(out_path, "rb") as f:
-            header = f.readline().decode().strip()   # "PF" (color) or "Pf" (grayscale)
-            dims = f.readline().decode().strip()
-            scale = float(f.readline().decode().strip())
-            cols, rows = map(int, dims.split())
-            
-            endian = '<' if scale < 0 else '>'
-            drr_np = np.frombuffer(f.read(), dtype=f"{endian}f4").copy()
-            drr_np = drr_np.reshape((rows, cols))
-            
-            # Plastimatch's coordinate system (u = vup x n) exactly matches 
-            # our Monte Carlo setup (right = view x up). No flipping required.
+        # Read PFM (Portable FloatMap) manually — SimpleITK does not support pfm.
+        # PFM has a 3-line ASCII header (magic bytes, dimensions, byte-order/scale) followed by raw float32 pixel data.
+        try:
+            with open(out_path, "rb") as f:
+                header = f.readline().decode().strip()   # "PF" (color) or "Pf" (grayscale)
+                dims = f.readline().decode().strip()     # "<cols> <rows>"
+                scale = float(f.readline().decode().strip())  # sign encodes endianness
+                cols, rows = map(int, dims.split())
+
+                endian = '<' if scale < 0 else '>'
+                drr_np = np.frombuffer(f.read(), dtype=f"{endian}f4").copy()
+                drr_np = drr_np.reshape((rows, cols))
+
+                # Plastimatch's coordinate system (u = vup x n) exactly matches
+                # our Monte Carlo setup (right = view x up). No flipping required.
+        except (OSError, ValueError) as exc:
+            logger.error("[Plastimatch] Failed to parse output .pfm file: %s", exc)
+            return None
 
         drr_np = drr_np[np.newaxis, np.newaxis, ...]  # (1, 1, H, W)
 

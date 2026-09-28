@@ -15,10 +15,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data import load_ct_volume, make_diffdrr_subject
-from plotter import plot_speed, plot_vram, print_summary
-from benchmarks import run_speed, run_vram, run_quality, run_optimization
-from utils.logger import setup_logger, get_logger
+from drr.data import load_ct_volume, make_diffdrr_subject
+from drr.plotter import plot_speed, plot_vram, print_summary
+from drr.benchmarks import (
+    run_speed, run_vram, run_quality, run_optimization,
+    run_multiview, run_resolution_sweep, run_dvr_sampling_ablation,
+)
+from drr.utils.logger import setup_logger, get_logger
 
 
 # --- Logger --- #
@@ -45,17 +48,28 @@ def main():
                         help="DVR: sample points per ray (default: 320).")
     parser.add_argument("--opt-iters",   type=int,   default=300,
                         help="Max registration optimisation iterations (default: 300).")
+    parser.add_argument("--quality-resolutions", type=int, nargs="+",
+                        default=[64, 128, 256, 512],
+                        help="Resolutions for the quality-vs-resolution sweep — "
+                             "powers of 2 for a clean per-doubling trend "
+                             "(default: 64 128 256 512).")
+    parser.add_argument("--dvr-npts",    type=int,   nargs="+",
+                        default=[16, 32, 64, 128, 256, 512],
+                        help="DVR samples-per-ray values for the sampling-cost "
+                             "ablation — powers of 2 (default: 16 32 64 128 256 512).")
     parser.add_argument("--output",      type=str,   default="benchmark_results",
                         help="Output directory for plots and JSON (default: ./benchmark_results).")
     args = parser.parse_args()
 
-    CT_SIZE     = args.size
-    WARMUP      = args.warmup
-    REPEATS     = args.repeats
-    RESOLUTIONS = args.resolutions
-    N_PTS       = args.n_pts
-    OPT_ITERS   = args.opt_iters
-    OUT_DIR     = Path(args.output)
+    CT_SIZE       = args.size
+    WARMUP        = args.warmup
+    REPEATS       = args.repeats
+    RESOLUTIONS   = args.resolutions
+    N_PTS         = args.n_pts
+    OPT_ITERS     = args.opt_iters
+    QUALITY_RES   = args.quality_resolutions
+    DVR_NPTS_LIST = args.dvr_npts
+    OUT_DIR       = Path(args.output)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -124,6 +138,9 @@ def main():
         RESULTS["vram"]         = run_vram(volume_tensor, subject, RESOLUTIONS, N_PTS, CT_SIZE, voxel_spacing, DEVICE)
         RESULTS["quality"]      = run_quality(volume_tensor, subject, N_PTS, CT_SIZE, voxel_spacing, DEVICE, ct_out_dir)
         RESULTS["optimization"] = run_optimization(volume_tensor, subject, N_PTS, CT_SIZE, voxel_spacing, OPT_ITERS, DEVICE, ct_out_dir)
+        RESULTS["multiview"]    = run_multiview(volume_tensor, subject, N_PTS, CT_SIZE, voxel_spacing, DEVICE, ct_out_dir)
+        RESULTS["quality_vs_resolution"] = run_resolution_sweep(volume_tensor, subject, N_PTS, CT_SIZE, voxel_spacing, DEVICE, QUALITY_RES, ct_out_dir)
+        RESULTS["dvr_sampling_ablation"] = run_dvr_sampling_ablation(volume_tensor, subject, CT_SIZE, voxel_spacing, DEVICE, 200, DVR_NPTS_LIST, WARMUP, REPEATS, ct_out_dir)
 
         # ── 3. Print summary table ────────────────────────────────────────────────
         print_summary(RESULTS)
