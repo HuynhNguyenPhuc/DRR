@@ -8,6 +8,7 @@ import subprocess
 import numpy as np
 import torch
 
+from drr.data import density_to_hu
 from drr.utils.logger import get_logger
 from .config import GeometryConfig, DEFAULT_GEOMETRY
 
@@ -62,20 +63,18 @@ def generate_plastimatch_drr(
 
         # 4. Save CT volume
         # Plastimatch's DRR lookup table expects Hounsfield Units (HU).
-        # Convert normalised density [0, 1] → HU: 0 = -1000 (air), 1 = +3000 (bone).
-        hu_np = (vol_np * 4_000.0 - 1_000.0).astype(np.float32)
+        hu_np = density_to_hu(vol_np)
 
         # vol_np is (X, Y, Z). SimpleITK GetImageFromArray expects (Z, Y, X) order for 3D numpy arrays.
         hu_np = np.transpose(hu_np, (2, 1, 0))
         image = sitk.GetImageFromArray(hu_np)
         image.SetSpacing([voxel_spacing, voxel_spacing, voxel_spacing])
 
-        # Center the volume at the world origin so the isocenter (0,0,0) passes through the volume midpoint.
+        # Centre the volume on the world origin: ITK's origin is the centre of the first voxel, so voxel i
+        # sits at (i - (n - 1) / 2) * spacing, the same centred grid DVR and DiffDRR use.
         # vol_np axes are (X, Y, Z), so shape[0] is X dimension.
-        half_x = float(vol_np.shape[0]) * voxel_spacing / 2.0
-        half_y = float(vol_np.shape[1]) * voxel_spacing / 2.0
-        half_z = float(vol_np.shape[2]) * voxel_spacing / 2.0
-        image.SetOrigin([-half_x, -half_y, -half_z])
+        origin = [-(n - 1) * voxel_spacing / 2.0 for n in vol_np.shape]
+        image.SetOrigin(origin)
         sitk.WriteImage(image, in_path)
 
         # 5. Build plastimatch command

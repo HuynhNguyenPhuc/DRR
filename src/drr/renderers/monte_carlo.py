@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Physics data  (NIST XCOM, interpolated)
+# Physics data  (NIST X-ray mass attenuation tables, log-log interpolated)
 # ═════════════════════════════════════════════════════════════════════════════
 
 # Discrete energy bins used by the polychromatic integration (keV).
@@ -31,19 +31,19 @@ _SPECTRUM_WEIGHTS_RAW = np.array(
     dtype=np.float64,
 )
 
-# NIST XCOM: total mass attenuation coefficient μ/ρ (cm²/g) for WATER.
-# Indexed to _ENERGY_BINS_KEV.
+# Total mass attenuation coefficients μ/ρ (cm²/g) from the NIST X-ray mass attenuation tables
+# (Hubbell & Seltzer, NIST SRD 126): the tabulated values at 20/30/40/50/60/80 keV, log-log
+# interpolated in between. Indexed to _ENERGY_BINS_KEV.
 _MU_RHO_WATER = np.array(
-    [0.8096, 0.5503, 0.3756, 0.3190, 0.2683, 0.2452, 0.2269,
-     0.2169, 0.2059, 0.1964, 0.1925, 0.1837],
+    [0.8096, 0.5305, 0.3756, 0.3136, 0.2683, 0.2456, 0.2269,
+     0.2157, 0.2059, 0.1995, 0.1937, 0.1837],
     dtype=np.float64,
 )  # cm²/g
 
-# NIST XCOM: total mass attenuation coefficient μ/ρ (cm²/g) for CORTICAL BONE
-# (ICRU-44, ρ = 1.92 g/cm³).
+# Cortical bone (ICRU-44, ρ = 1.92 g/cm³).
 _MU_RHO_BONE = np.array(
-    [3.668, 2.028, 1.331, 0.9653, 0.7296, 0.5873, 0.5057,
-     0.4367, 0.3934, 0.3618, 0.3350, 0.2955],
+    [4.001, 2.183, 1.331, 0.9181, 0.6655, 0.5247, 0.4242,
+     0.363, 0.3148, 0.286, 0.2616, 0.2229],
     dtype=np.float64,
 )  # cm²/g
 
@@ -136,83 +136,70 @@ def _build_detector_pixels(
 # Core ray-marching integrator (energy-indexed)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _march_primary(
+def _sample_density(
     vol_np: np.ndarray,         # (D, H, W)  normalised density [0, 1]
     voxel_spacing: float,       # mm
     source_pos: np.ndarray,     # (3,)
     pixel_pos: np.ndarray,      # (H, W, 3)
-    mu_tissue_e: float,         # mm⁻¹ at energy bin e
-    mu_bone_e: float,           # mm⁻¹ at energy bin e
     n_pts: int,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """
-    Compute Beer-Lambert transmission map for one energy bin via ray marching.
-
-    At each sample point, μ_eff blends soft-tissue and bone μ by local density: 
-    ``μ_eff = density * (density * μ_bone_e + (1 − density) * μ_tissue_e)``.
-    The outer `density *` factor (beyond the density/(1-density) blend itself)
-    zeroes out μ_eff at density=0 (air) even though μ_tissue_e alone is
-    nonzero — see the comment at the call site for why.
+    Sample density at ``n_pts`` evenly spaced points along the part of each ray inside the volume.
 
     Args:
-        vol_np (np.ndarray): The CT density volume, values in [0, 1].
+        vol_np (np.ndarray): The CT density volume, values in [0, 1], centred at the world origin.
         voxel_spacing (float): Voxel size in mm.
         source_pos (np.ndarray): World-space X-ray source position, in mm.
         pixel_pos (np.ndarray): World-space position of every detector pixel, in mm.
-        mu_tissue_e (float): Soft-tissue attenuation at this energy bin (mm⁻¹).
-        mu_bone_e (float): Bone attenuation at this energy bin (mm⁻¹).
-        n_pts (int): Sample points to march along each ray.
+        n_pts (int): Sample points per ray.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: Trilinearly interpolated density, shape ``(n_pts, H, W)``,
+        and each ray's step length in mm, shape ``(H, W)``.
+    """
+    from scipy.ndimage import map_coordinates
+
+    # Voxel i's centre sits at (i - (n - 1) / 2) * spacing, the centred grid every renderer uses;
+    # the volume's box spans half a voxel beyond the first and last centres.
+    half_mm = (np.array(vol_np.shape, dtype=np.float64) - 1) * voxel_spacing / 2.0
+    box_lo  = -half_mm - voxel_spacing / 2.0
+    box_hi  =  half_mm + voxel_spacing / 2.0
+    ray_vec = pixel_pos - source_pos[None, None, :]  # (H, W, 3)
+
+    # Slab test: parameters t in [0, 1] where each ray enters and leaves the volume's box.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t_a = (box_lo - source_pos) / ray_vec
+        t_b = (box_hi - source_pos) / ray_vec
+    t_enter = np.clip(np.nanmax(np.minimum(t_a, t_b), axis=-1), 0.0, 1.0)
+    t_exit  = np.clip(np.nanmin(np.maximum(t_a, t_b), axis=-1), 0.0, 1.0)
+    t_exit  = np.maximum(t_exit, t_enter)  # rays that miss the volume get zero length
+
+    frac = (np.arange(n_pts, dtype=np.float64) + 0.5) / n_pts
+    t    = t_enter[None] + frac[:, None, None] * (t_exit - t_enter)[None]        # (N, H, W)
+    pts  = source_pos + t[..., None] * ray_vec[None]                              # (N, H, W, 3)
+    vox  = (pts + half_mm) / voxel_spacing
+    density = map_coordinates(
+        vol_np, vox.reshape(-1, 3).T, order=1, mode="constant", cval=0.0,
+    ).reshape(t.shape).astype(np.float32)
+
+    step_mm = (t_exit - t_enter) * np.linalg.norm(ray_vec, axis=-1) / n_pts
+    return density, step_mm
+
+
+def _transmission(density: np.ndarray, step_mm: np.ndarray, mu_tissue_e: float, mu_bone_e: float) -> np.ndarray:
+    """
+    Beer-Lambert transmission for one energy bin from pre-sampled densities.
+
+    At each sample, μ_eff blends soft-tissue and bone μ by local density:
+    ``μ_eff = density * (density * μ_bone_e + (1 − density) * μ_tissue_e)``.
+    The outer ``density *`` factor makes air (density 0) attenuate nothing.
 
     Returns:
         np.ndarray: Transmission image (fraction of beam getting through), in [0, 1].
     """
-    D, H_vol, W_vol = vol_np.shape
-    H, W            = pixel_pos.shape[:2]
-    half_mm         = np.array(vol_np.shape, dtype=np.float64) * voxel_spacing / 2.0
-
-    # Ray vectors from source to each pixel (mm).
-    ray_vec  = pixel_pos - source_pos[None, None, :]  # (H, W, 3)
-    ray_len  = np.linalg.norm(ray_vec, axis=-1)       # (H, W)
-
-    line_integral = np.zeros((H, W), dtype=np.float64)
-
-    for k in range(n_pts):
-        t = (k + 0.5) / n_pts
-        # World-space sample point for all pixels simultaneously.
-        pt = source_pos[None, None, :] + t * ray_vec  # (H, W, 3)
-
-        # Convert to voxel indices.
-        vox = (pt + half_mm[None, None, :]) / voxel_spacing  # (H, W, 3)
-
-        ix = np.round(vox[..., 0]).astype(np.int32)
-        iy = np.round(vox[..., 1]).astype(np.int32)
-        iz = np.round(vox[..., 2]).astype(np.int32)
-
-        # Track which samples actually fall inside the volume before clipping,
-        # so out-of-bounds rays contribute zero attenuation instead of
-        # sampling the nearest edge voxel.
-        inside = (
-            (ix >= 0) & (ix < D)
-            & (iy >= 0) & (iy < H_vol)
-            & (iz >= 0) & (iz < W_vol)
-        )
-
-        # Clip so the (now-masked) out-of-bounds indices are still valid for
-        # the fancy-indexing lookup below.
-        ix = np.clip(ix, 0, D - 1)
-        iy = np.clip(iy, 0, H_vol - 1)
-        iz = np.clip(iz, 0, W_vol - 1)
-
-        density = vol_np[ix, iy, iz] * inside          # (H, W)
-
-        # density=0 → air (μ=0); density=1 → bone (μ=μ_bone).
-        # Multiplying by density ensures air voxels contribute zero attenuation,
-        # preventing the black-image artifact caused by tissue μ applied to air.
-        mu_eff  = density * (density * mu_bone_e + (1.0 - density) * mu_tissue_e)
-        line_integral += mu_eff
-
-    line_integral *= (ray_len / n_pts)
-    return np.exp(-line_integral).astype(np.float32)    # transmission (H, W)
+    mu_eff = density * (density * mu_bone_e + (1.0 - density) * mu_tissue_e)
+    line_integral = mu_eff.sum(axis=0, dtype=np.float64) * step_mm
+    return np.exp(-line_integral).astype(np.float32)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -229,7 +216,7 @@ def generate_mc_drr(
     add_quantum_noise: bool = False,
     n_photons: float = 1e5,
     scatter_fraction: float = 0.12,
-    scatter_sigma_px: float = 8.0,
+    scatter_sigma_mm: float = 15.0,
     seed: int = 42,
 ) -> torch.Tensor | None:
     """
@@ -245,7 +232,8 @@ def generate_mc_drr(
         add_quantum_noise (bool): Whether to add Poisson photon noise.
         n_photons (float): The number of photons per pixel for the Poisson noise model.
         scatter_fraction (float): The fraction of the primary beam that is Compton-scattered and reaches the detector.
-        scatter_sigma_px (float): The blur radius of the scatter, in pixels — larger is more diffuse.
+        scatter_sigma_mm (float): The scatter blur's standard deviation on the detector, in mm, so it is
+            the same physical width at every output resolution.
         seed (int): The random seed, for reproducible noise.
 
     Returns:
@@ -276,22 +264,18 @@ def generate_mc_drr(
     # 2. Polychromatic integration
     primary = np.zeros((image_size, image_size), dtype=np.float64)
 
-    for e_idx, (w, mu_t, mu_b) in enumerate(
-        zip(weights, _MU_TISSUE_MM, _MU_BONE_MM)
-    ):
-        transmission = _march_primary(
-            vol_np, voxel_spacing, source_pos, pixel_pos,
-            float(mu_t), float(mu_b), n_pts,
-        )
-        primary += w * transmission.astype(np.float64)
+    # Density does not depend on energy, so sample it once and reuse it for every bin.
+    density, step_mm = _sample_density(vol_np, voxel_spacing, source_pos, pixel_pos, n_pts)
+    for w, mu_t, mu_b in zip(weights, _MU_TISSUE_MM, _MU_BONE_MM):
+        primary += w * _transmission(density, step_mm, float(mu_t), float(mu_b)).astype(np.float64)
 
     primary = primary.astype(np.float32)
 
-    # 3. First-order Compton scatter estimation
+    # 3. Scatter approximation (a heuristic, not a transport model)
     # A Gaussian blur over the attenuated primary approximates the angular spread of Compton-scattered photons reaching each detector pixel.
     scatter_kernel = gaussian_filter(
         (1.0 - primary) * scatter_fraction,
-        sigma=scatter_sigma_px,
+        sigma=scatter_sigma_mm / (ct_size * float(voxel_spacing) / image_size),
     )
     image = primary + scatter_kernel
 

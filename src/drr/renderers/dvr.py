@@ -16,7 +16,6 @@ try:
     from pytorch3d.renderer.implicit.raymarching import (
         _check_density_bounds,
         _check_raymarcher_inputs,
-        _shifted_cumprod,
     )
     _PYTORCH3D_AVAILABLE = True
 
@@ -64,7 +63,7 @@ def _require_pytorch3d():
 # ═════════════════════════════════════════════════════════════════════════════
 
 class AbsorptionEmissionRaymarcher(EmissionAbsorptionRaymarcher if _PYTORCH3D_AVAILABLE else object):
-    """Custom absorption-emission raymarcher for X-Ray volume rendering."""
+    """Raymarcher that integrates features along each ray, as an X-ray line integral."""
 
     def __init__(self, *args, **kwargs):
         # Check for PyTorch3D availability.
@@ -76,17 +75,17 @@ class AbsorptionEmissionRaymarcher(EmissionAbsorptionRaymarcher if _PYTORCH3D_AV
         self,
         rays_densities: torch.Tensor,
         rays_features: torch.Tensor,
-        eps: float = 1e-10,
+        ray_bundle=None,
         **kwargs,
     ) -> torch.Tensor:
         """
-        Raymarch each ray back-to-front instead of PyTorch3D's default front-to-back.
-        It better matches how X-rays actually attenuate.
+        Compute ``sum_k density_k * feature_k * step_k`` along each ray, with no transmittance
+        term: an X-ray pixel depends on all material along the ray, not only the nearest.
 
         Args:
-            rays_densities: Density at each sample point along each ray, in ``[0, 1]``.
+            rays_densities: Per-sample weight (opacity) in ``[0, 1]``; 1 inside the volume by default.
             rays_features: Feature value at each sample point.
-            eps: The tiny constant to avoid dividing by (near-)zero transmittance.
+            ray_bundle: PyTorch3D ray bundle; its lengths and directions give each sample's step length.
 
         Returns:
             Tensor: Integrated feature per ray, with final opacity appended as the last channel.
@@ -104,15 +103,15 @@ class AbsorptionEmissionRaymarcher(EmissionAbsorptionRaymarcher if _PYTORCH3D_AV
 
         rays_densities = rays_densities[..., 0]
 
-        # Reverse direction: compute absorption from the end of the ray backwards.
-        absorption = _shifted_cumprod(
-            (1.0 + eps) - rays_densities.flip(dims=(-1,)),
-            shift=-self.surface_thickness,
-        ).flip(dims=(-1,))
+        # Samples are evenly spaced in camera depth (the raysampler is un-stratified); the distance
+        # between them along the ray grows by the direction vector's norm (1 / cos of the off-axis
+        # angle). One step per ray keeps memory at O(rays) rather than O(rays x samples).
+        lengths = ray_bundle.lengths
+        step = (lengths[..., -1:] - lengths[..., :1]) / (lengths.shape[-1] - 1)
+        step = step * ray_bundle.directions.norm(dim=-1, keepdim=True)
 
-        # Compute features and opacities along the ray.
-        weights  = rays_densities * absorption
-        features = (weights[..., None] * rays_features).sum(dim=-2)
+        # einsum avoids materialising the (rays x samples x channels) product.
+        features = torch.einsum("...n,...nc->...c", rays_densities, rays_features) * step
         opacities = 1.0 - torch.prod(1.0 - rays_densities, dim=-1, keepdim=True)
 
         return torch.cat((features, opacities), dim=-1)
@@ -198,7 +197,7 @@ class BaseXRayVolumeRenderer(nn.Module):
         Args:
             volume: The density volume, values in ``[0, 1]``.
             cameras: List of PyTorch3D cameras objects defining the viewpoint(s).
-            opacity: The separate opacity volume, if it differs from `volume`.
+            opacity: Per-voxel weight on the line integral; defaults to 1 everywhere inside the volume.
             norm_type: The output normalisation — ``"minimized"``, ``"normalized"``, ``"standardized"``, or ``None``.
             scaling_factor: The multiplier applied to densities before rendering.
             is_grayscale: Whether to average the RGB channels into one.
@@ -274,7 +273,7 @@ class ScreenCentricXRayVolumeRenderer(BaseXRayVolumeRenderer):
 class ObjectCentricXRayVolumeRenderer(BaseXRayVolumeRenderer):
     """Object-centric renderer — uses AbsorptionEmissionRaymarcher.
 
-    This reverses the integration order so that absorbing structures (e.g., bones) appear bright in the final X-ray image.
+    Its raymarcher integrates density along each ray, so dense structures such as bone come out bright.
     """
 
     def __init__(self, **kwargs):
@@ -372,7 +371,7 @@ def build_dvr_renderer(image_size: int, n_pts: int, ct_size: int, voxel_spacing:
     u = u / np.linalg.norm(u)
 
     # PyTorch3D uses:
-    # +X left, +Y down, +Z forward
+    # +X left, +Y up, +Z forward (view direction), so x = u x d = -right and y = up
     z_cam = d
     x_cam = np.cross(u, z_cam)
     x_cam = x_cam / np.linalg.norm(x_cam)

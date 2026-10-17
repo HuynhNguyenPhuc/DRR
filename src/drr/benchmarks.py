@@ -323,7 +323,7 @@ def run_quality(volume_tensor, subject, n_pts, ct_size, voxel_spacing, device, o
     except Exception as exc:
         logger.debug("    DiffDRR trilinear: skipped (%s)", exc)
 
-    # DeepDRR (physics-based, DL scatter, validated against MC)
+    # DeepDRR (polychromatic, segmented materials; no scatter in the installed version)
     img_deepdrr = generate_deepdrr_drr(volume_tensor, voxel_spacing, RES, device)
     if img_deepdrr is not None:
         images["deepdrr"] = img_deepdrr
@@ -380,11 +380,20 @@ def run_quality(volume_tensor, subject, n_pts, ct_size, voxel_spacing, device, o
     return results
 
 
+def _rotation_error_deg(R: torch.Tensor, R_ref: torch.Tensor) -> float:
+    """Angle of the rotation taking ``R_ref`` to ``R``, in degrees (float64, no clamping)."""
+    M = (R_ref.transpose(-1, -2) @ R).reshape(3, 3).double()
+    sin = torch.stack([M[2, 1] - M[1, 2], M[0, 2] - M[2, 0], M[1, 0] - M[0, 1]]).norm() / 2
+    cos = (M.trace() - 1) / 2
+    return float(torch.rad2deg(torch.atan2(sin, cos)))
+
+
 def run_optimization(volume_tensor, subject, n_pts, ct_size, voxel_spacing, opt_iters, device, out_dir):
     """
-    Perturbs the camera pose 15° off ground truth and runs gradient descent
-    (Adam + ZNCC loss) with DVR and DiffDRR to measure registration
-    convergence speed.
+    Perturbs the camera pose 15° in pitch (about the world X axis) and runs gradient
+    descent (Adam + ZNCC loss) with DVR and DiffDRR back toward the target pose, each
+    against a target rendered by the same renderer. Stops at ZNCC >= 0.9995 and records
+    the remaining rotation and source-position error.
 
     Args:
         volume_tensor: The CT density volume to render, already loaded into memory.
@@ -397,8 +406,9 @@ def run_optimization(volume_tensor, subject, n_pts, ct_size, voxel_spacing, opt_
         out_dir: Folder to save the ``registration_convergence.png`` loss-curve plot into.
 
     Returns:
-        results: For ``"dvr"``/``"diffdrr"`` — converged iteration, elapsed
-            time, final ZNCC, and loss curve; ``None`` where unavailable.
+        results: For ``"dvr"``/``"diffdrr"`` — converged iteration, elapsed time, final
+            ZNCC, final rotation error (deg) and source-position error (mm), and the
+            loss curve; ``None`` where unavailable.
     """
     logger.info("")
     logger.info("─" * 64)
@@ -406,57 +416,53 @@ def run_optimization(volume_tensor, subject, n_pts, ct_size, voxel_spacing, opt_
     logger.info("─" * 64)
 
     OPT_RES     = 150     # lower resolution than the quality checks, for faster iterations
-    CONVERGENCE = -0.99   # ZNCC threshold — loss is negated ZNCC, so -0.99 loss means 0.99 ZNCC
+    # ZNCC 0.99 is already reached about 5° from the target; 0.9995 corresponds to under ~0.3°.
+    CONVERGENCE = 0.9995
     LR          = 1e-2
     PERTURB_DEG = 15.0
     opt_results = {}
     vol         = volume_tensor.to(device)
+    mm_per_ndc  = ct_size * voxel_spacing / 2.0
+
+    perturb_rad = float(PERTURB_DEG * np.pi / 180.0)
+    R_perturb = torch.tensor([[
+        [1.0, 0.0, 0.0],
+        [0.0, np.cos(perturb_rad), -np.sin(perturb_rad)],
+        [0.0, np.sin(perturb_rad), np.cos(perturb_rad)],
+    ]], dtype=torch.float32, device=device)  # pinned: np.cos/np.sin would make this float64
 
     # ── DVR registration ─────────────────────────────────────────────────────
     try:
-        # pytorch3d is optional — these imports exist only to raise
-        # ImportError early if it's missing, before any GPU work starts.
-        from drr.renderers.dvr import ObjectCentricXRayVolumeRenderer
-        from pytorch3d.renderer.cameras import FoVPerspectiveCameras
+        from pytorch3d.transforms import axis_angle_to_matrix
 
         logger.info("")
         logger.info("  [DVR] Setting up registration ...")
 
-        # Step 1: render the ground-truth target from the default (un-perturbed) pose.
+        # Step 1: render the target from the default pose.
         renderer, cam_gt = build_dvr_renderer(OPT_RES, n_pts, ct_size, voxel_spacing, device)
+        if renderer is None:
+            raise ImportError("pytorch3d not available")
         with torch.no_grad():
             target_dvr = renderer(vol, cam_gt, norm_type="normalized")
 
-        # Step 2: perturb the rotation to give the optimiser something to recover from.
-        R_gt = cam_gt.R[0]
-        # Rotating around X matches DiffDRR's own pitch perturbation below,
-        # keeping both renderers' starting poses consistent.
-        perturb_rad = float(PERTURB_DEG * np.pi / 180.0)
-        # np.cos/np.sin return float64, which would make this tensor
-        # float64 too and fail to matmul against float32 R_gt — pin the dtype.
-        R_perturb = torch.tensor([[
-            [1.0, 0.0, 0.0],
-            [0.0, np.cos(perturb_rad), -np.sin(perturb_rad)],
-            [0.0, np.sin(perturb_rad), np.cos(perturb_rad)],
-        ]], dtype=torch.float32, device=device)
-        R_init = R_perturb @ R_gt.unsqueeze(0)   # apply the perturbation on top of GT
+        # Step 2: start from the target pose rotated 15° about X.
+        R_gt, T_gt = cam_gt.R.clone(), cam_gt.T.clone()
+        R_init = R_perturb @ R_gt
 
-        # Step 3: set up the optimisable pose and the Adam optimiser.
-        T_opt = cam_gt.T.clone().requires_grad_(True)
-        R_opt = R_init.clone().requires_grad_(True)
-
-        optimizer      = torch.optim.Adam([R_opt, T_opt], lr=LR)
+        # Step 3: optimise an axis-angle offset on R_init, so the rotation stays in SO(3).
+        omega = torch.zeros(1, 3, device=device, requires_grad=True)
+        T_opt = T_gt.clone().requires_grad_(True)
+        optimizer      = torch.optim.Adam([omega, T_opt], lr=LR)
         losses_dvr     = []
         converged_iter = opt_iters
         t0             = time.perf_counter()
 
-        # Step 4: gradient-descend the perturbed pose back toward the GT target.
+        # Step 4: gradient-descend back toward the target.
         for it in range(opt_iters):
             optimizer.zero_grad()
 
-            # Rebuild the camera with the updated pose, same intrinsics
             cam_cur = cam_gt.clone()
-            cam_cur.R = R_opt
+            cam_cur.R = axis_angle_to_matrix(omega) @ R_init
             cam_cur.T = T_opt
 
             img_cur = renderer(vol, cam_cur, norm_type="normalized")
@@ -470,22 +476,31 @@ def run_optimization(volume_tensor, subject, n_pts, ct_size, voxel_spacing, opt_
             if it % 50 == 0 or it < 5:
                 logger.debug("    iter %4d  ZNCC=%.4f", it, zncc_val)
 
-            if zncc_val >= abs(CONVERGENCE):
+            if zncc_val >= CONVERGENCE:
                 converged_iter = it + 1
                 logger.info("    ✓ DVR converged at iteration %d", converged_iter)
                 break
 
-        # Step 5: record results.
+        # Step 5: record results, including the pose error the image metric cannot see.
         elapsed = time.perf_counter() - t0
+        with torch.no_grad():
+            R_fin = axis_angle_to_matrix(omega) @ R_init
+            # PyTorch3D cameras map world to view as X R + T, so the camera centre is -T R^T.
+            centre     = -(T_opt @ R_fin.transpose(1, 2))
+            centre_gt  = -(T_gt @ R_gt.transpose(1, 2))
+            rot_err    = _rotation_error_deg(R_fin, R_gt)
+            centre_err = float((centre - centre_gt).norm()) * mm_per_ndc
         opt_results["dvr"] = {
             "converged_iter": converged_iter,
             "elapsed_s": round(elapsed, 2),
             "final_zncc": -losses_dvr[-1],
+            "rotation_error_deg": rot_err,
+            "source_error_mm": centre_err,
             "loss_curve": losses_dvr,
         }
         logger.info(
-            "    DVR  total time: %.1f s  | final ZNCC: %.4f",
-            elapsed, -losses_dvr[-1],
+            "    DVR  total time: %.1f s  | final ZNCC: %.4f | rotation error %.2f° | source error %.1f mm",
+            elapsed, -losses_dvr[-1], rot_err, centre_err,
         )
 
     except ImportError as exc:
@@ -500,12 +515,13 @@ def run_optimization(volume_tensor, subject, n_pts, ct_size, voxel_spacing, opt_
     try:
         # diffdrr is optional — a missing install just skips this branch.
         from diffdrr.drr import DRR as DiffDRR_module
+        from diffdrr.pose import convert
 
         logger.info("")
         logger.info("  [DiffDRR] Setting up registration ...")
         delx = ct_size * voxel_spacing / OPT_RES
 
-        # Step 1: render the ground-truth target from the default (identity-rotation) pose.
+        # Step 1: render the target from DiffDRR's identity-rotation pose.
         drr     = DiffDRR_module(subject, sdd=DEFAULT_GEOMETRY.sdd, height=OPT_RES, delx=delx).to(device)
         rot_gt  = torch.tensor([[0.0, 0.0, 0.0]], device=device)
         xyz_gt  = torch.tensor([[
@@ -514,20 +530,13 @@ def run_optimization(volume_tensor, subject, n_pts, ct_size, voxel_spacing, opt_
             DEFAULT_GEOMETRY.sad * DEFAULT_GEOMETRY.view_dir_z,
         ]], device=device)
         with torch.no_grad():
-            # No horizontal flip needed — this renderer's raw output already
-            # matches every other renderer's orientation.
             target_ddrr = drr(rot_gt, xyz_gt, parameterization="euler_angles", convention="ZXY")
+        pose_gt = convert(rot_gt, xyz_gt, parameterization="euler_angles", convention="ZXY").matrix[0]
 
         # Step 2: perturb the rotation the same way the DVR branch above does.
-        perturb_rad = float(PERTURB_DEG * np.pi / 180.0)
-        # With convention="ZXY", index 1 is the X-axis rotation — matches
-        # the DVR branch above, which also perturbs around X.
+        # With convention="ZXY", index 1 is the X-axis rotation.
         rot_opt = torch.tensor([[0.0, perturb_rad, 0.0]], device=device, requires_grad=True)
-        xyz_opt = torch.tensor([[
-            DEFAULT_GEOMETRY.sad * DEFAULT_GEOMETRY.view_dir_x,
-            DEFAULT_GEOMETRY.sad * DEFAULT_GEOMETRY.view_dir_y,
-            DEFAULT_GEOMETRY.sad * DEFAULT_GEOMETRY.view_dir_z,
-        ]], device=device, requires_grad=True)
+        xyz_opt = xyz_gt.clone().requires_grad_(True)
 
         # Step 3: set up the Adam optimiser over the perturbed rotation/translation.
         optimizer      = torch.optim.Adam([rot_opt, xyz_opt], lr=LR)
@@ -535,7 +544,7 @@ def run_optimization(volume_tensor, subject, n_pts, ct_size, voxel_spacing, opt_
         converged_iter = opt_iters
         t0             = time.perf_counter()
 
-        # Step 4: gradient-descend the perturbed pose back toward the GT target.
+        # Step 4: gradient-descend back toward the target.
         for it in range(opt_iters):
             optimizer.zero_grad()
             img_cur  = drr(rot_opt, xyz_opt, parameterization="euler_angles", convention="ZXY")
@@ -549,22 +558,28 @@ def run_optimization(volume_tensor, subject, n_pts, ct_size, voxel_spacing, opt_
             if it % 50 == 0 or it < 5:
                 logger.debug("    iter %4d  ZNCC=%.4f", it, zncc_val)
 
-            if zncc_val >= abs(CONVERGENCE):
+            if zncc_val >= CONVERGENCE:
                 converged_iter = it + 1
                 logger.info("    ✓ DiffDRR converged at iteration %d", converged_iter)
                 break
 
         # Step 5: record results.
         elapsed = time.perf_counter() - t0
+        with torch.no_grad():
+            pose = convert(rot_opt, xyz_opt, parameterization="euler_angles", convention="ZXY").matrix[0]
+            rot_err    = _rotation_error_deg(pose[:3, :3], pose_gt[:3, :3])
+            centre_err = float((pose[:3, 3] - pose_gt[:3, 3]).norm())
         opt_results["diffdrr"] = {
             "converged_iter": converged_iter,
             "elapsed_s": round(elapsed, 2),
             "final_zncc": -losses_ddrr[-1],
+            "rotation_error_deg": rot_err,
+            "source_error_mm": centre_err,
             "loss_curve": losses_ddrr,
         }
         logger.info(
-            "    DiffDRR total time: %.1f s  | final ZNCC: %.4f",
-            elapsed, -losses_ddrr[-1],
+            "    DiffDRR total time: %.1f s  | final ZNCC: %.4f | rotation error %.2f° | source error %.1f mm",
+            elapsed, -losses_ddrr[-1], rot_err, centre_err,
         )
 
     except ImportError as exc:

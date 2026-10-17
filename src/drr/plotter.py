@@ -207,20 +207,21 @@ def print_summary(results: dict) -> None:
     if opt:
         logger.info("")
         logger.info("  ■ Registration (2D/3D) Convergence")
-        logger.info("  %12s  %10s  %10s  %12s",
-                    "Method", "Converged", "Time (s)", "Final ZNCC")
-        logger.info("  %s  %s  %s  %s",
-                    "-" * 12, "-" * 10, "-" * 10, "-" * 12)
+        logger.info("  %12s  %10s  %10s  %12s  %10s  %10s",
+                    "Method", "Converged", "Time (s)", "Final ZNCC", "Rot (deg)", "Src (mm)")
+        logger.info("  %s  %s  %s  %s  %s  %s",
+                    "-" * 12, "-" * 10, "-" * 10, "-" * 12, "-" * 10, "-" * 10)
         for method in ["dvr", "diffdrr"]:
             v     = opt.get(method)
             label = "DVR" if method == "dvr" else "DiffDRR"
             if v:
-                logger.info("  %12s  %10s  %10.1f  %12.4f",
+                logger.info("  %12s  %10s  %10.2f  %12.4f  %10.2f  %10.1f",
                             label, f"iter {v['converged_iter']}",
-                            v["elapsed_s"], v["final_zncc"])
+                            v["elapsed_s"], v["final_zncc"],
+                            v["rotation_error_deg"], v["source_error_mm"])
             else:
-                logger.info("  %12s  %10s  %10s  %12s",
-                            label, "N/A", "N/A", "N/A")
+                logger.info("  %12s  %10s  %10s  %12s  %10s  %10s",
+                            label, "N/A", "N/A", "N/A", "N/A", "N/A")
 
     logger.info("")
     logger.info("=" * 64)

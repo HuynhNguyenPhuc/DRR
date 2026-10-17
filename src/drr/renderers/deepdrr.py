@@ -5,34 +5,13 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from drr.data import density_to_hu
 from drr.utils.logger import get_logger
 from .config import GeometryConfig, DEFAULT_GEOMETRY
 
 
 # --- Logger --- #
 logger = get_logger(__name__)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# HU conversion utilities
-# ═════════════════════════════════════════════════════════════════════════════
-
-def _density_to_hu(volume_tensor: torch.Tensor) -> np.ndarray:
-    """
-    Convert normalised density [0, 1] to approximate Hounsfield Units (HU).
-
-    Linear mapping: 0 → -1000 HU (air), 1 → +3000 HU (cortical bone). 
-    For real CT data, original HU values should be used directly instead.
-
-    Args:
-        volume_tensor (torch.Tensor): The CT density volume.
-
-    Returns:
-        np.ndarray: The volume in Hounsfield Units, as ``float32``.
-    """
-    vol_np = volume_tensor.detach().cpu().squeeze().numpy()  # (D, H, W)
-    hu = vol_np * 4_000.0 - 1_000.0
-    return hu.astype(np.float32)
 
 
 def generate_deepdrr_drr(
@@ -43,10 +22,11 @@ def generate_deepdrr_drr(
     geometry: GeometryConfig | None = None,
 ) -> torch.Tensor | None:
     """
-    Generate a physically realistic DRR using DeepDRR's GPU-accelerated simulator.
+    Generate a polychromatic DRR with DeepDRR's GPU projector.
 
-    Models beam-hardening and Compton scatter, making it a physics-based reference 
-    that is orders of magnitude faster than stochastic photon-tracking codes.
+    Thresholds the volume into air / soft tissue / bone and models beam hardening
+    through the library's default 90 kVp spectrum. No scatter: the installed library
+    has deprecated its scatter estimation.
 
     Args:
         volume_tensor (torch.Tensor): The CT density volume, in [0, 1].
@@ -80,7 +60,7 @@ def generate_deepdrr_drr(
 
     try:
         # 2. Build DeepDRR volume from HU
-        hu_values = _density_to_hu(volume_tensor)  # (D, H, W)
+        hu_values = density_to_hu(volume_tensor.detach().cpu().squeeze().numpy())  # (D, H, W)
 
         half_mm = D * voxel_spacing / 2.0
         spacing = (float(voxel_spacing),) * 3
@@ -121,14 +101,16 @@ def generate_deepdrr_drr(
             geo.up_vec_x, geo.up_vec_y, geo.up_vec_z,
         )
 
-        # We must add the config isocenter offset to the volume's physical center in world
-        cx = float(ct_volume.center_in_world[0])
-        cy = float(ct_volume.center_in_world[1])
-        cz = float(ct_volume.center_in_world[2])
+        # Aim at the centre voxel, index (D - 1) / 2, which is the world origin in every other
+        # renderer. DeepDRR's kernel samples at ijk position p - 1 (project_kernel.cu, "offset by
+        # -1.0f"), so voxel i is actually drawn at ijk i + 1 and the centre voxel at (D + 1) / 2.
+        # `center_in_world` (index D / 2) left the image about one pixel off the other renderers.
+        c = (D + 1) / 2.0
+        centre = np.array(ct_volume.world_from_ijk @ ddgeo.point(c, c, c), dtype=np.float64)
         isocenter = ddgeo.point(
-            cx + geo.isocenter_x, 
-            cy + geo.isocenter_y, 
-            cz + geo.isocenter_z
+            centre[0] + geo.isocenter_x,
+            centre[1] + geo.isocenter_y,
+            centre[2] + geo.isocenter_z,
         )
 
         dd_device.set_view(
@@ -150,13 +132,22 @@ def generate_deepdrr_drr(
 
         # 4. Render
         logger.debug("[DeepDRR] Initialising projector ...")
+        # neglog=False: the library's own neglog adds the image minimum before taking the log,
+        # which compresses the most attenuated regions. Use -log(I / I0) instead.
         with deepdrr.Projector(
             ct_volume,
             device  = dd_device,
-            neglog  = True,
+            neglog  = False,
             max_mesh_hits = 8,
         ) as projector:
-            image_np = projector()
+            intensity = projector()
+            # Unattenuated intensity (keV per photon): the spectrum's mean energy, using the same pdf as the kernel.
+            energies_kev = projector.spectrum_arr[:, 0] / 1000.0
+            pdf = projector.spectrum_arr[:, 1] / np.sum(projector.spectrum_arr[:, 1])
+            open_beam = float(np.sum(energies_kev * pdf))
+
+        image_np = -np.log(np.clip(intensity / open_beam, 1e-6, None))
+        image_np = (image_np - image_np.min()) / (image_np.max() - image_np.min() + 1e-8)
 
         # 5. Post-process
         if needs_180_correction:
