@@ -1,168 +1,212 @@
-# Monte Carlo Method
+# Monte Carlo: Polychromatic Ray Marching with Approximate Scatter
 
 *(part of [Methodology](../METHODOLOGY.md))*
 
-A real X-ray tube's output is a spectrum, not a single photon energy, and material attenuation
-$\mu(E)$ is energy-dependent. This method approximates the resulting beam-hardening and scatter
-effects with a deliberately simplified model — polychromatic ray-marching at fixed step intervals,
-plus a Gaussian-blur scatter kernel — rather than tracing individual photon histories
-stochastically (hence not being true Monte Carlo transport, despite the name).
+This renderer is the suite's attempt at a more realistic radiograph than the benchmark reference: it
+models a 12-bin X-ray tube spectrum, gives soft tissue and bone their own energy-dependent
+attenuation, and adds an approximate scatter haze. Despite its name, it is not a Monte Carlo
+simulation. Nothing in it is random: each ray is marched deterministically, and scatter is a
+fixed blur rather than tracked photons. The name is kept only for continuity with the code. Being
+polychromatic and including a scatter term, it belongs to the *non-linear* group of
+[METHODOLOGY.md](../METHODOLOGY.md) §3.3. It illustrates what beam hardening and scatter do to an
+image; it is not a measure of accuracy.
 
-## Algorithm
+The sections follow one ray through the renderer: the spectrum it carries, how each sample
+attenuates it, how the samples are taken, how the energy bins are recombined, and how scatter is
+added.
 
-1. **Geometry.** Build a world-space source point and a grid of detector-pixel positions from the
-   configured source-to-detector distance, source-to-axis distance, isocenter, view direction, and
-   up vector.
-2. **Spectrum discretisation.** Split the modeled X-ray tube spectrum (80 kVp tungsten anode,
-   aluminum + copper filtration) into a small number of discrete energy bins, each assigned a
-   normalised weight $w_e$ (Eq. 1).
-3. **Per-bin ray march.** For each energy bin $e$ and each ray, step along the ray at $N$ fixed
-   intervals; at each step, look up the local density and blend it into an effective attenuation
-   coefficient for that bin (Eq. 2), then accumulate that bin's line integral (Eq. 3) and convert
-   it to a transmission (Eq. 4).
-4. **Polychromatic combination.** Weight-sum every bin's transmission by its spectral weight to get
-   one polychromatic primary transmission (Eq. 5) — this is what produces beam hardening.
-5. **Scatter approximation.** Apply a Gaussian blur to the attenuated primary signal to approximate
-   Compton scatter (Eq. 6), then convert the combined signal to attenuation units (Eq. 7).
-6. **Optional noise.** Re-sample the deterministic image from a Poisson distribution to add
-   photon-counting (shot) noise (Eq. 8).
+<p align="center">
+  <img src="../../assets/figures/monte_carlo_pipeline.png" width="760" alt="Pipeline: 3D CT volume, effective attenuation against density at 20 and 80 keV, the 12-bin spectrum weights, and the resulting DRR after the scatter blur">
+  <br><em>Figure 1. Monte Carlo's pipeline. Attenuation depends on energy (shown for the lowest and highest bin), so the ray march is repeated once per bin, and only the resulting transmissions are combined with the spectrum weights — the step that makes the model polychromatic. A scatter blur is added before the final image.</em>
+</p>
 
-<figure>
-<img src="../../assets/results/method_crops/monte_carlo.png" alt="Monte Carlo rendered chest DRR, AP view" width="360">
-<figcaption>Actual Monte Carlo output on the same CT/geometry as the Plastimatch reference above. The softer contrast and diffuse haze relative to Plastimatch — most visible around the lung fields — is the polychromatic beam-hardening (Eq 5) and Gaussian-blur scatter term (Eq 6) this method adds on top of the base line integral; see <code>METHODOLOGY.md</code> for why that's an intentional physical difference, not lower quality.</figcaption>
-</figure>
+## Contents
 
-<figure>
-<svg viewBox="0 0 600 300" width="100%" style="max-width:600px;font-family:-apple-system,Segoe UI,Roboto,sans-serif" role="img" aria-labelledby="mcov-title mcov-desc">
-<title id="mcov-title">One sample's density, traced through the attenuation blend</title>
-<desc id="mcov-desc">Effective attenuation is a quadratic blend of tissue and bone attenuation, weighted by local density; the curve at right shows that blend is nonlinear, not a straight interpolation.</desc>
-<rect x="20" y="20" width="260" height="260" fill="none" stroke="#93c5fd" stroke-width="1.5"></rect>
-<image href="../../assets/results/method_crops/monte_carlo_small.png" x="20" y="20" width="260" height="260"></image>
-<circle cx="150" cy="165" r="7" fill="none" stroke="#facc15" stroke-width="3"></circle>
-<path d="M157,165 C230,165 250,150 300,150" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4 3" fill="none"></path>
-<rect x="300" y="20" width="280" height="260" rx="8" fill="#fafbfc" stroke="#93c5fd" stroke-width="1.5"></rect>
-<text x="440" y="40" text-anchor="middle" font-size="11.5" fill="#1e3a5f" font-weight="600">density → attenuation, at 50 keV</text>
-<path d="M320,200 H560" stroke="#64748b" stroke-width="1.5" fill="none"></path>
-<path d="M320,200 V60" stroke="#64748b" stroke-width="1.5" fill="none"></path>
-<path d="M320,200 L344,196 L368,189 L392,181 L416,170 L440,157 L464,142 L488,125 L512,105 L536,84 L560,60"
-      stroke="#2b6cb0" stroke-width="2.5" fill="none"></path>
-<circle cx="476" cy="133" r="4.5" fill="#d97706"></circle>
-<path d="M476,133 V200" stroke="#d97706" stroke-width="1" stroke-dasharray="3 2"></path>
-<text x="476" y="220" text-anchor="middle" font-size="9.5" fill="#8a6d1f">ρₖ=0.65</text>
-<text x="486" y="130" font-size="10" fill="#8a6d1f">μ_eff≈0.046</text>
-<text x="320" y="214" font-size="10" fill="#64748b">air (ρ=0)</text>
-<text x="560" y="214" text-anchor="end" font-size="10" fill="#64748b">bone (ρ=1)</text>
-<text x="440" y="234" text-anchor="middle" font-size="10" fill="#64748b">ρₖ (local density)</text>
-<text x="312" y="55" text-anchor="end" font-size="10" fill="#64748b">μ_eff</text>
-<text x="440" y="256" text-anchor="middle" font-size="10.5" fill="#334155">μ_eff = ρₖ·(ρₖ·μ_bone + (1-ρₖ)·μ_tissue)</text>
-</svg>
-<figcaption>Eq 2's density blend is quadratic, not linear — this curve plots it at the 50 keV bin (<code>μ_tissue≈0.023</code>, <code>μ_bone≈0.097</code> mm⁻¹, from the NIST XCOM tables in <code>monte_carlo.py</code>). A sample at <code>ρₖ=0.65</code> doesn't get 65% of the way from tissue to bone attenuation — the outer <code>ρₖ·(…)</code> factor pulls the curve down for medium densities, so partial-density voxels (edges, partial-volume effects) attenuate less than a linear blend would suggest.</figcaption>
-</figure>
+1. [The spectrum](#1-the-spectrum)
+2. [Attenuation at one sample](#2-attenuation-at-one-sample)
+3. [Marching the ray](#3-marching-the-ray)
+4. [Recombining the spectrum: beam hardening](#4-recombining-the-spectrum-beam-hardening)
+5. [Scatter and the final image](#5-scatter-and-the-final-image)
+6. [Empirical behaviour](#6-empirical-behaviour)
+7. [Limitations](#7-limitations)
+8. [Mapping to the code](#8-mapping-to-the-code)
+9. [References](#9-references)
 
-<figure>
-<svg viewBox="0 0 380 230" width="100%" style="max-width:380px;font-family:-apple-system,Segoe UI,Roboto,sans-serif" role="img" aria-labelledby="mcex-title mcex-desc">
-<title id="mcex-title">Polychromatic spectrum discretisation and beam hardening</title>
-<desc id="mcex-desc">The modeled 80kVp X-ray tube spectrum is split into discrete energy bins, each with its own weight; each bin is ray-marched separately at its own attenuation rate, so low-energy bins are depleted faster with depth than high-energy ones.</desc>
-<defs>
-<marker id="mcex-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
-<path d="M0,0 L10,5 L0,10 z" fill="#64748b"></path>
-</marker>
-</defs>
-<rect x="150" y="14" width="14" height="10" fill="#2b6cb0"></rect>
-<text x="168" y="23" font-size="9.5" fill="#334155">entry spectrum</text>
-<path d="M260,19 H274" stroke="#d97706" stroke-width="2" stroke-dasharray="4 2" fill="none"></path>
-<text x="278" y="23" font-size="9.5" fill="#334155">after ~10cm tissue</text>
-<path d="M20,180 H365" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#mcex-arrow)"></path>
-<path d="M20,180 V50" stroke="#64748b" stroke-width="1.5" fill="none"></path>
-<rect x="25" y="175" width="22" height="5" fill="#2b6cb0"></rect>
-<rect x="51" y="158" width="22" height="22" fill="#2b6cb0"></rect>
-<rect x="77" y="131" width="22" height="49" fill="#2b6cb0"></rect>
-<rect x="103" y="98" width="22" height="82" fill="#2b6cb0"></rect>
-<rect x="129" y="72" width="22" height="108" fill="#2b6cb0"></rect>
-<rect x="155" y="60" width="22" height="120" fill="#2b6cb0"></rect>
-<rect x="181" y="60" width="22" height="120" fill="#2b6cb0"></rect>
-<rect x="207" y="70" width="22" height="110" fill="#2b6cb0"></rect>
-<rect x="233" y="74" width="22" height="106" fill="#2b6cb0"></rect>
-<rect x="259" y="116" width="22" height="64" fill="#2b6cb0"></rect>
-<rect x="285" y="122" width="22" height="58" fill="#2b6cb0"></rect>
-<rect x="311" y="132" width="22" height="48" fill="#2b6cb0"></rect>
-<path d="M25,179 H47" stroke="#d97706" stroke-width="2" stroke-dasharray="4 2"></path>
-<path d="M51,175 H73" stroke="#d97706" stroke-width="2" stroke-dasharray="4 2"></path>
-<path d="M77,167 H99" stroke="#d97706" stroke-width="2" stroke-dasharray="4 2"></path>
-<path d="M103,153 H125" stroke="#d97706" stroke-width="2" stroke-dasharray="4 2"></path>
-<path d="M129,138 H151" stroke="#d97706" stroke-width="2" stroke-dasharray="4 2"></path>
-<path d="M155,127 H177" stroke="#d97706" stroke-width="2" stroke-dasharray="4 2"></path>
-<path d="M181,119 H203" stroke="#d97706" stroke-width="2" stroke-dasharray="4 2"></path>
-<path d="M207,118 H229" stroke="#d97706" stroke-width="2" stroke-dasharray="4 2"></path>
-<path d="M233,114 H255" stroke="#d97706" stroke-width="2" stroke-dasharray="4 2"></path>
-<path d="M259,136 H281" stroke="#d97706" stroke-width="2" stroke-dasharray="4 2"></path>
-<path d="M285,137 H307" stroke="#d97706" stroke-width="2" stroke-dasharray="4 2"></path>
-<path d="M311,142 H333" stroke="#d97706" stroke-width="2" stroke-dasharray="4 2"></path>
-<text x="36" y="196" text-anchor="middle" font-size="10" fill="#64748b">20 keV</text>
-<text x="322" y="196" text-anchor="middle" font-size="10" fill="#64748b">80 keV</text>
-<text x="192" y="210" text-anchor="middle" font-size="11" fill="#334155">energy bins e</text>
-<text x="16" y="55" text-anchor="end" font-size="11" fill="#334155">wₑ</text>
-</svg>
-<figcaption>The modeled tube spectrum (Eq 1), discretised: each bar is one energy bin's weight <code>wₑ</code> at skin entry. The dashed amber lines mark, illustratively, how much of each bin survives ~10cm of tissue — the low-energy (left) bins are cut down much further than the high-energy (right) ones, so the surviving spectrum is skewed toward higher energies at depth. Every bin is still ray-marched independently at its own <code>μ</code> (Eq 2-4) and only combined afterward (Eq 5); this per-bin depletion, not the entry spectrum's shape alone, is what beam hardening actually is.</figcaption>
-</figure>
+---
 
-## Mathematical Formulation
+## 1. The spectrum
 
-**(1) Spectrum weights.** The modeled tube spectrum is represented by weights $w_e$ for each energy
-bin $e$, derived from the Kramers–Bohlin bremsstrahlung model plus characteristic lines and
-filtration, normalised so $\sum_e w_e = 1$.
+A tube operated at 80 kVp emits photons at every energy up to 80 keV. This renderer represents
+that continuous spectrum by 12 energy bins: 20 to 60 keV in 5 keV steps, then 65, 70 and 80 keV.
+Each bin $`E`$ carries a weight $`w_E`$, the fraction of photons at that energy, normalised so
+that
 
-**(2) Per-sample effective attenuation.** At sample point $k$ along a ray (parametric offset
-$t_k=(k+0.5)/N$), with local density $\rho_k\in[0,1]$:
+```math
+\sum_E w_E = 1
+```
 
-$$
-\mu_{\text{eff},k} = \rho_k\cdot\Big(\rho_k\,\mu_{\text{bone},e} + (1-\rho_k)\,\mu_{\text{tissue},e}\Big)
-$$
+The weights are a fixed table, modelled on a tungsten-anode tube with 2 mm of aluminium and
+0.3 mm of copper filtration. The filtration removes most low-energy photons before they reach the
+patient, which is why the 20 keV bin carries almost no weight.
 
-The outer $\rho_k\cdot(\cdots)$ factor — beyond the density/(1−density) blend itself — guarantees
-$\rho_k=0$ (air) contributes exactly zero attenuation; without it, a density of exactly 0 would
-still pick up $\mu_{\text{tissue},e}$.
+<p align="center">
+  <img src="../../assets/figures/monte_carlo_spectrum.png" width="480" alt="Bar chart of the real 12-bin spectrum weights used by this renderer">
+  <br><em>Figure 2. The 12 normalised bin weights. Most photons are between 35 and 60&nbsp;keV; the mean energy is 51&nbsp;keV.</em>
+</p>
 
-**(3) Per-bin line integral (Riemann sum).**
+Every later step is carried out separately for each bin, starting with how much a single sample
+attenuates a photon of that energy.
 
-$$
-\int \mu_e\,dl \approx \left(\sum_k \mu_{\text{eff},k}\right)\cdot\frac{\lVert\mathbf{ray}\rVert}{N}
-$$
+## 2. Attenuation at one sample
 
-**(4) Per-bin transmission.**
+The renderer knows two materials, soft tissue (modelled as water) and cortical bone. For each,
+the attenuation at bin energy $`E`$ is the material's tabulated mass attenuation coefficient [1]
+multiplied by its physical density, 1.00 g/cm³ for water and 1.92 g/cm³ for cortical bone:
 
-$$
-T_e = \exp\left(-\int \mu_e\,dl\right)
-$$
+```math
+\mu_{\text{tissue},E} = \Big(\frac{\mu}{\rho}\Big)_{\text{water},E} \cdot 1.00,
+\qquad
+\mu_{\text{bone},E} = \Big(\frac{\mu}{\rho}\Big)_{\text{bone},E} \cdot 1.92
+```
 
-**(5) Polychromatic combination (beam hardening).**
+The tables hold the NIST values at the bins NIST tabulates (20, 30, 40, 50, 60 and 80 keV), and
+log–log interpolation between them for the others. At 50 keV that gives 0.0227 mm⁻¹ for tissue
+and 0.0814 mm⁻¹ for bone.
 
-$$
-T_{\text{primary}} = \sum_e w_e\,T_e = \sum_e w_e\exp\left(-\int \mu_e\,dl\right)
-$$
+A sample with normalised density $`\rho_k`$ is treated as a mixture: the fraction $`\rho_k`$ is
+bone and the rest tissue, and the result is scaled by $`\rho_k`$ once more,
 
-Unlike a monochromatic model, this is a weighted sum of exponentials, not a single exponential of
-one averaged $\mu$ — each bin attenuates at its own rate, and low-energy bins are removed faster
-than high-energy ones as depth increases, which is exactly the beam-hardening effect.
+```math
+\mu_{\text{eff},k} = \rho_k\Big(\rho_k\,\mu_{\text{bone},E} + (1-\rho_k)\,\mu_{\text{tissue},E}\Big)
+```
 
-**(6) Scatter kernel.**
+The outer factor makes air, $`\rho_k = 0`$, attenuate nothing; without it, air would attenuate
+like soft tissue. The price is that the blend is quadratic in $`\rho_k`$, so medium densities
+attenuate less than a straight-line blend would suggest. It is a heuristic, not a calibration:
+water itself, at $`\rho = 0.25`$, comes out at 0.0093 mm⁻¹ at 50 keV, well under the 0.0227 mm⁻¹
+of the water table.
 
-$$
-S = \text{GaussianBlur}\big((1-T_{\text{primary}})\cdot f_{\text{scatter}},\ \sigma\big)
-$$
+<p align="center">
+  <img src="../../assets/figures/monte_carlo_density_curve.png" width="420" alt="Curve of effective attenuation against density at 50 keV, compared with a straight line from air to bone">
+  <br><em>Figure 3. The blend above at 50&nbsp;keV (blue), against a straight line from air to bone (dashed). A sample at ρ = 0.5 attenuates at 0.026&nbsp;mm⁻¹, under a third of bone's 0.081.</em>
+</p>
 
-**(7) Attenuation conversion.**
+With the attenuation of one sample defined, the next question is where the samples are taken.
 
-$$
-\text{image} = -\log\big(\text{clip}(T_{\text{primary}}+S,\ \epsilon,\ 1)\big)
-$$
+## 3. Marching the ray
 
-matching the attenuation convention (bone bright, air dark) shared by every method.
+Each ray runs from the source to one detector pixel. The renderer first finds where the ray
+enters the volume's bounding box and where it leaves it or reaches the detector, whichever comes
+first — the same slab test as the first step of
+[Plastimatch](plastimatch.md) §2 — and places $`N`$ samples (128 by default) evenly over that
+segment, at its midpoints $`t_k = t_{\text{in}} + (k + \tfrac12)(t_{\text{out}} - t_{\text{in}})/N`$.
+On the central ray that is one sample every 2.7 mm, about one per voxel. Each sample reads the density
+by trilinear interpolation of the eight surrounding voxels, and samples outside the volume read
+zero. Density does not depend on energy, so it is sampled once and reused for all 12 bins.
 
-**(8) Poisson shot noise (optional).**
+The line integral for bin $`E`$ is the Riemann sum of the sample attenuations times the step
+length, and its transmission follows from Beer–Lambert:
 
-$$
-\text{counts}\sim\text{Poisson}(\text{image}\cdot M), \qquad \text{image}_{\text{noisy}} = \frac{\text{counts}}{M}
-$$
+```math
+\int \mu_E\, dl \approx \Delta l \sum_k \mu_{\text{eff},k},
+\qquad
+\Delta l = \frac{(t_{\text{out}} - t_{\text{in}})\,\lVert \mathbf{p}_1 - \mathbf{p}_0 \rVert}{N},
+\qquad
+T_E = \exp\Big(-\int \mu_E\, dl\Big)
+```
 
-for $M$ open-beam photons.
+where $`\mathbf{p}_0`$ is the source and $`\mathbf{p}_1`$ the pixel.
+
+## 4. Recombining the spectrum: beam hardening
+
+The primary transmission is the spectrum-weighted average of the 12 per-bin transmissions:
+
+```math
+T_{\text{primary}} = \sum_E w_E\,T_E = \sum_E w_E \exp\Big(-\int \mu_E\, dl\Big)
+```
+
+This is a sum of exponentials that decay at different rates, not a single exponential. Low-energy
+bins are attenuated much faster than high-energy ones, so the deeper a ray goes, the more of what
+survives is high-energy, and the more slowly the remaining beam is attenuated. That is beam
+hardening. Its visible effect is that $`-\log T_{\text{primary}}`$ grows less than linearly with
+the amount of tissue crossed.
+
+<p align="center">
+  <img src="../../assets/figures/monte_carlo_beam_hardening.png" width="560" alt="Per-bin transmission curves along one ray through the example CT, with low-energy bins depleting faster than high-energy ones">
+  <br><em>Figure 4. Transmission against depth along the same ray as <a href="plastimatch.md">Plastimatch's Figure&nbsp;3</a>, for three of the 12 bins and for the weighted total. By 150&nbsp;mm the 20&nbsp;keV bin is down to 0.1%, while the 80&nbsp;keV bin keeps 52%; at the far side of the body the total is 7%, against 18% for the 80&nbsp;keV bin alone.</em>
+</p>
+
+## 5. Scatter and the final image
+
+Scattered photons reach the detector from many directions, so they add a smooth haze rather than
+a sharp image. The renderer approximates that haze by taking the fraction of the beam that was
+removed, $`1 - T_{\text{primary}}`$, scaling it by a scatter fraction $`f`$ (0.12 by default),
+and blurring it over the detector with a Gaussian whose standard deviation is
+$`\sigma = 15`$ mm by default:
+
+```math
+S = G_\sigma * \big(f\,(1 - T_{\text{primary}})\big)
+```
+
+where $`*`$ is a 2D convolution. The width is specified in millimetres on the detector and
+converted to pixels with the pixel pitch, so the haze has the same physical extent at every output
+resolution. Adding $`S`$ and converting to attenuation gives the image:
+
+```math
+\text{image} = -\log\Big(\mathrm{clip}\big(T_{\text{primary}} + S,\ 10^{-6},\ 1\big)\Big)
+```
+
+The haze raises the transmission most where the primary is darkest, behind thick anatomy, so it
+lowers contrast there. The renderer can also add Poisson noise, but the benchmark never enables
+it.
+
+## 6. Empirical behaviour
+
+<p align="center">
+  <img src="../../assets/results/method_crops/monte_carlo.png" width="360" alt="Monte Carlo rendered chest DRR, AP view">
+  <br><em>Figure 5. The renderer's output on the same CT and geometry as the Plastimatch reference.</em>
+</p>
+
+Compared with the benchmark reference, contrast is softer: the lung fields and the sides of the body are
+brighter relative to the mediastinum. Edges stay sharp, because the blur of §5 applies only to the
+added scatter term. Against Plastimatch the render has the largest RMSE of the five, 0.102, and the
+lowest SSIM, 0.946 ([RESULTS.md](../RESULTS.md) §4) — though the SSIM is much closer to the others
+than the RMSE, because the two metrics measure different things. The pixel-by-pixel comparison in
+[METHODOLOGY.md](../METHODOLOGY.md) §5 shows Monte Carlo's pixels on a smooth concave curve
+against the benchmark reference's: a large, systematic difference in intensity, which RMSE counts in
+full, but one that preserves local structure, which is what SSIM measures. The difference may
+come from the spectrum, the density blend of §2 and the scatter approximation together; the
+experiments here do not separate them. Across the six views of
+the multi-view sweep its SSIM stays between 0.90 and 0.96 ([RESULTS.md](../RESULTS.md) §6), and it
+is the same at every output resolution, since the scatter blur is specified in millimetres
+([RESULTS.md](../RESULTS.md) §7).
+
+## 7. Limitations
+
+- **Scatter is a heuristic.** Real scatter depends on the patient's thickness, the field size and
+  the distance to the detector. Here it is a fixed fraction and a fixed blur, so it only conveys
+  the qualitative effect.
+- **Two materials, and density read as a bone fraction.** Every sample is a blend of water and
+  cortical bone (§2); lung, fat and contrast agents have no tables of their own, and the blend
+  uses the normalised density directly, so even water is treated as a quarter bone.
+- **Not stochastic.** Despite the name, every image is deterministic; nothing is sampled at
+  random unless the optional noise is switched on.
+
+## 8. Mapping to the code
+
+| Concept | Where it lives |
+|---|---|
+| Entry point | `generate_mc_drr` (`src/drr/renderers/monte_carlo.py`) |
+| §1 spectrum | `_ENERGY_BINS_KEV`, `_SPECTRUM_WEIGHTS_RAW`, `_spectrum_weights()` |
+| §2 attenuation tables | `_MU_RHO_WATER`, `_MU_RHO_BONE`, `_RHO_WATER`, `_RHO_BONE`, giving `_MU_TISSUE_MM`, `_MU_BONE_MM`; the blend is `_transmission()` |
+| §3 ray march | `_sample_density()` (slab test, trilinear `scipy.ndimage.map_coordinates`); detector geometry from `_build_detector_pixels()`; sample count `n_pts` (default 128) |
+| §4 recombination | The weighted loop over bins in `generate_mc_drr` |
+| §5 scatter and noise | `scatter_fraction` (0.12), `scatter_sigma_mm` (15.0), `add_quantum_noise` (off), `n_photons` |
+
+## 9. References
+
+1. J.H. Hubbell, S.M. Seltzer. Tables of X-Ray Mass Attenuation Coefficients and Mass
+   Energy-Absorption Coefficients. *NIST Standard Reference Database 126*, National Institute of
+   Standards and Technology. (Water and cortical bone, ICRU-44.)
+2. J.T. Bushberg, J.A. Seibert, E.M. Leidholdt, J.M. Boone. *The Essential Physics of Medical
+   Imaging*, 4th ed. Wolters Kluwer. (Tube spectra, beam hardening, Compton scatter.)

@@ -1,103 +1,83 @@
-# DRR Documentation Router (`docs/INDEX.md`)
+# Documentation Guide
 
-Welcome to the **DRR Benchmarking Engine** documentation suite. This repository compares five
-Digitally Reconstructed Radiograph (DRR) rendering engines for medical imaging research — speed,
-VRAM footprint, image quality, and 2D/3D registration convergence.
+This repository benchmarks five renderers of digitally reconstructed radiographs (DRRs) —
+simulated X-ray images computed from a CT volume — for speed, GPU memory, image quality and
+2D/3D registration. This page says what each document covers and in which order to read them.
 
-Whether you're setting up the benchmark for the first time or digging into the physics behind one
-renderer, this document is your navigation map.
+## Contents
 
----
-
-## 1. Recommended Reading Path for New Readers
-
-If you're new to the project, read in this order:
-
-<figure>
-<svg viewBox="0 0 660 230" width="100%" style="max-width:640px;font-family:-apple-system,Segoe UI,Roboto,sans-serif" role="img" aria-labelledby="idx-fig-title idx-fig-desc">
-<title id="idx-fig-title">Recommended reading order</title>
-<desc id="idx-fig-desc">README leads to METHODOLOGY, which branches into the per-renderer method docs and DATA.md, both converging on CLAUDE.md.</desc>
-<defs>
-<marker id="idx-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
-<path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"></path>
-</marker>
-</defs>
-<rect x="16" y="87" width="140" height="56" rx="8" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5"></rect>
-<text x="86" y="111" text-anchor="middle" font-size="13" fill="#1e3a5f" font-weight="600">README.md</text>
-<text x="86" y="127" text-anchor="middle" font-size="10.5" fill="#5b7897">Setup &amp; results</text>
-<path d="M156,115 H198" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#idx-arrow)"></path>
-<rect x="200" y="87" width="160" height="56" rx="8" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5"></rect>
-<text x="280" y="111" text-anchor="middle" font-size="13" fill="#1e3a5f" font-weight="600">METHODOLOGY.md</text>
-<text x="280" y="127" text-anchor="middle" font-size="10.5" fill="#5b7897">Physics overview</text>
-<path d="M360,102 C395,102 395,45 430,45" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#idx-arrow)"></path>
-<path d="M360,128 C395,128 395,185 430,185" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#idx-arrow)"></path>
-<rect x="432" y="17" width="140" height="56" rx="8" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5"></rect>
-<text x="502" y="41" text-anchor="middle" font-size="13" fill="#1e3a5f" font-weight="600">methods/*.md</text>
-<text x="502" y="57" text-anchor="middle" font-size="10.5" fill="#5b7897">Per-renderer math</text>
-<rect x="432" y="157" width="140" height="56" rx="8" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5"></rect>
-<text x="502" y="181" text-anchor="middle" font-size="13" fill="#1e3a5f" font-weight="600">DATA.md</text>
-<text x="502" y="197" text-anchor="middle" font-size="10.5" fill="#5b7897">CT loading</text>
-<path d="M572,45 C600,45 600,105 578,105" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#idx-arrow)"></path>
-<path d="M572,185 C600,185 600,125 578,125" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#idx-arrow)"></path>
-<rect x="580" y="90" width="70" height="50" rx="8" fill="#eff6ff" stroke="#2b6cb0" stroke-width="2"></rect>
-<text x="615" y="111" text-anchor="middle" font-size="12" fill="#1e3a5f" font-weight="600">CLAUDE</text>
-<text x="615" y="126" text-anchor="middle" font-size="10.5" fill="#5b7897">.md</text>
-</svg>
-<figcaption>Reading order: <code>README.md</code> for setup/results, then <code>METHODOLOGY.md</code> for the shared physics, which branches into the per-renderer <code>methods/*.md</code> files and <code>DATA.md</code>, both feeding into <code>CLAUDE.md</code> for architecture and coordinate-system gotchas.</figcaption>
-</figure>
-
-1. **[`README.md`](../README.md)** — **Start here!** Installation, running the benchmarks, and the
-   sample results (speed/VRAM/quality/registration/multi-view tables and plots).
-2. **[`METHODOLOGY.md`](METHODOLOGY.md)** — The shared physics every renderer approximates
-   (Beer-Lambert transmission/attenuation) and how the five methods compare along ray-integration,
-   spectrum, and scatter axes.
-3. **[`methods/`](methods)** — One file per renderer, each with a fixed `## Algorithm` +
-   `## Mathematical Formulation` structure. Read whichever renderer you're touching.
-4. **[`DATA.md`](DATA.md)** — How a CT volume gets from a NIfTI path (or the built-in fallbacks) to
-   the `(volume_tensor, subject, voxel_spacing)` tuple every renderer consumes.
-5. **[`CLAUDE.md`](../CLAUDE.md)** — Codebase architecture, the shared geometry contract, and a
-   running list of coordinate-system traps that have bitten this repo before. Essential reading
-   before modifying any renderer.
+1. [Overview](#1-overview)
+2. [Recommended reading order](#2-recommended-reading-order)
+3. [Documents](#3-documents)
+4. [Per-renderer documents](#4-per-renderer-documents)
 
 ---
 
-## 2. Master Documentation Directory
+## 1. Overview
 
-| Document | Primary Focus | Best For |
-|:---|:---|:---|
-| **[`README.md`](../README.md)** | Setup, usage, and sample results | Installing dependencies, running `scripts/run_benchmark.py`, reading the results tables/plots |
-| **[`METHODOLOGY.md`](METHODOLOGY.md)** | Shared physics & cross-method comparison | Understanding what all five renderers are computing and how they trade off exactness, spectrum, and scatter |
-| **[`DATA.md`](DATA.md)** | CT volume loading & fallback chain | Understanding how `load_ct_volume()` sources a volume and builds the DiffDRR subject |
-| **[`CLAUDE.md`](../CLAUDE.md)** | Architecture, geometry contract & coordinate-system gotchas | Working on renderer code without reintroducing a fixed orientation/OOM bug |
+Every renderer receives the same density volume and the same camera geometry. Once the benchmark
+has rescaled each image to $`[0,1]`$, three of them — Plastimatch (the benchmark reference),
+DiffDRR and DVR — target the same quantity, the line integral of density along each ray, using different numerical
+integration schemes and implementation conventions. DiffDRR's exact mode reproduces the reference to
+floating-point precision, and DVR matches it with a normalised RMSE of about 0.008. The other two,
+Monte Carlo and DeepDRR, model an X-ray tube's spectrum, which makes their output a different
+function of the anatomy, so their pixel values differ from the reference by design even where
+their structure matches it closely.
 
----
+"Benchmark reference" means the renderer against which the others are scored. It is the exact
+integral of the single-energy model through the piecewise-constant voxel attenuation field, not a
+measurement of a real patient.
+[METHODOLOGY.md](METHODOLOGY.md) §3 derives the split between the two groups, each method document
+shows where its renderer falls, and [RESULTS.md](RESULTS.md) checks it against the measurements.
 
-## 3. Per-Renderer Method Docs (`docs/methods/`)
+## 2. Recommended reading order
 
-Each file follows the same two-section template: `## Algorithm` (numbered logical steps) and
-`## Mathematical Formulation` (numbered, derived equations), with equation cross-references
-between files where one method builds on another.
+<p align="center">
+  <img src="../assets/figures/index_reading_path.png" width="700" alt="README leads to METHODOLOGY, then DATA, the per-renderer method documents and RESULTS in sequence; CONVENTIONS, INSTALLATION and DEVELOPMENT_NOTES are reference documents">
+  <br><em>Figure 1. Reading order. The main row is the narrative; the three reference documents below it are consulted as needed.</em>
+</p>
 
-| Method | Path | Key Focus |
-|:---|:---|:---|
-| **Plastimatch** (ground truth) | [`methods/plastimatch.md`](methods/plastimatch.md) | Exact Siddon ray-voxel intersection, HU calibration, Beer-Lambert transmission |
-| **Monte Carlo** (secondary reference) | [`methods/monte_carlo.md`](methods/monte_carlo.md) | Polychromatic ray-marching, beam hardening, Gaussian-blur scatter approximation |
-| **DiffDRR** | [`methods/diffdrr.md`](methods/diffdrr.md) | Same exact line integral as Plastimatch, made differentiable for gradient-based registration |
-| **DVR** | [`methods/dvr.md`](methods/dvr.md) | Graphics volume-rendering equation repurposed for attenuation, shown equivalent to Beer-Lambert |
-| **DeepDRR** | [`methods/deepdrr.md`](methods/deepdrr.md) | Exact ray tracing through segmented, polychromatic materials — scatter-free in this benchmark (deprecated in the installed library) |
+1. **[`README.md`](../README.md)** — what the project does, a quick start, and representative
+   results.
+2. **[`METHODOLOGY.md`](METHODOLOGY.md)** — the physics of a radiograph, the shared camera
+   geometry, and the argument that splits the five renderers into two groups.
+3. **[`DATA.md`](DATA.md)** — how a CT scan becomes the density volume every renderer reads: the
+   HU encoding and the resampling that keeps the scan's physical size.
+4. **[`methods/`](methods)** — one document per renderer, in any order (§4).
+5. **[`RESULTS.md`](RESULTS.md)** — measured tables and plots, interpreted against the theory.
 
----
+Three documents are for reference rather than reading in sequence:
 
-## 4. Sample Results (`assets/results/`)
+- **[`CONVENTIONS.md`](CONVENTIONS.md)** — every shared parameter, its units and default, and how
+  each renderer receives it. Consult it when you need a number or are adding a renderer.
+- **[`INSTALLATION.md`](INSTALLATION.md)** — full installation, the configuration the results were
+  measured with, and fixes for common problems.
+- **[`DEVELOPMENT_NOTES.md`](DEVELOPMENT_NOTES.md)** — the bugs found while building the benchmark,
+  and how fixing them changed the numbers.
 
-Rendered comparison plots referenced from `README.md`'s "Sample results" section — speed, VRAM,
-image quality, registration convergence, multi-view compatibility, and the resolution/sampling
-sweeps. Not documentation in themselves; see `README.md` §"Sample results" for the tables and
-narrative around each plot.
+## 3. Documents
 
-| | | |
-|:---:|:---:|:---:|
-| ![Speed](../assets/results/speed_comparison.png) | ![VRAM](../assets/results/vram_comparison.png) | ![Quality](../assets/results/quality_comparison.png) |
-| Speed | VRAM | Quality vs. Plastimatch GT |
-| ![Registration](../assets/results/registration_convergence.png) | ![Multi-view](../assets/results/multiview_renderer.png) | ![Quality vs resolution](../assets/results/quality_vs_resolution.png) |
-| Registration convergence | Multi-view compatibility | Quality vs. resolution |
+| Document | Answers |
+|---|---|
+| **[`README.md`](../README.md)** | What does this project do, and how do I run it? |
+| **[`INSTALLATION.md`](INSTALLATION.md)** | How do I install every dependency, and what do I do when it fails? |
+| **[`METHODOLOGY.md`](METHODOLOGY.md)** | What is each renderer trying to compute, in what geometry, and why do some agree with the reference and others not? |
+| **[`DATA.md`](DATA.md)** | Where does the volume come from, and how are its HU values and physical size carried into the density cube? |
+| **[`CONVENTIONS.md`](CONVENTIONS.md)** | What does each shared parameter mean, in what units, with what default, and how does each renderer receive it? |
+| **[`RESULTS.md`](RESULTS.md)** | How fast, how memory-hungry and how accurate is each renderer, and how well does registration work? |
+| **[`DEVELOPMENT_NOTES.md`](DEVELOPMENT_NOTES.md)** | Which bugs were found along the way, and what did they change? |
+
+## 4. Per-renderer documents
+
+Each follows the same shape: a first paragraph placing the renderer in one of the two groups of
+[METHODOLOGY.md](METHODOLOGY.md) §3.3, a pipeline figure, numbered sections that follow one ray
+from the volume to the pixel, an empirical section tying the renders and scores back to the
+derivation, limitations, a mapping from each concept to the code, and references.
+
+| Renderer | Document | Group | In one line |
+|---|---|---|---|
+| **Plastimatch** (benchmark reference) | [`methods/plastimatch.md`](methods/plastimatch.md) | linear | Exact ray–voxel lengths by Siddon's algorithm; no sampling at all |
+| **DiffDRR** | [`methods/diffdrr.md`](methods/diffdrr.md) | linear | The same exact integral, differentiable, used for pose registration |
+| **DVR** | [`methods/dvr.md`](methods/dvr.md) | linear | A graphics volume renderer whose raymarcher computes a sampled line integral of density |
+| **Monte Carlo** | [`methods/monte_carlo.md`](methods/monte_carlo.md) | non-linear | A deterministic 12-bin polychromatic ray march with a blurred scatter approximation |
+| **DeepDRR** | [`methods/deepdrr.md`](methods/deepdrr.md) | non-linear | A 0.1 mm ray march through thresholded materials with a 90 kVp spectrum; no scatter in the installed version |

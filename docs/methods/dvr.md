@@ -1,148 +1,197 @@
-# DVR
+# DVR: A Volume Renderer Used as a Line Integrator
 
 *(part of [Methodology](../METHODOLOGY.md))*
 
-This method starts from a different equation entirely: the volume-rendering equation used in
-computer graphics for translucent media like smoke or clouds, where every point along a ray has
-both an opacity and a colour, accumulated front-to-back. There's no meaningful "emitted colour" for
-a CT voxel, so density is reused for both terms — and the resulting accumulation turns out to be
-mathematically equivalent to the same Beer-Lambert integral every other method computes, just
-arrived at from a different starting equation and evaluated as a finite Riemann sum rather than an
-exact integral.
+DVR is built on the differentiable volume renderer of PyTorch3D [1], a computer-graphics library
+for drawing semi-transparent media such as smoke by compositing samples along each ray. An X-ray
+needs something different: every bit of matter along the ray should count equally, with nothing
+hiding what lies behind it. This document shows how the renderer is configured to compute exactly
+that, a sampled line integral of density. It is sampled rather than exact, models no spectrum and
+no scatter, and belongs to the *linear* group of [METHODOLOGY.md](../METHODOLOGY.md) §3.3, next to
+Plastimatch and DiffDRR.
 
-## Algorithm
+<p align="center">
+  <img src="../../assets/figures/dvr_pipeline.png" width="900" alt="Pipeline on the example CT: 3D volume, the normalised camera with its depth window, trilinear samples along one ray through a voxel patch, the sampled densities, and the resulting DRR">
+  <br><em>Figure 1. DVR's pipeline on the example CT. Dashed lines mark the depth window (§2); the close-up shows evenly spaced trilinear samples along one ray, coloured by sampled density. The fourth stage replaces the library's compositing with a plain line integral (§3).</em>
+</p>
 
-1. **Unit conversion.** Scale physical mm units into a normalized device coordinate (NDC) cube
-   $[-1,1]^3$ (Eq. 1).
-2. **Camera basis.** Build the same orthonormal view/up basis used elsewhere (Eq. 1 in
-   [DiffDRR](diffdrr.md)), oriented for this coordinate convention.
-3. **Camera placement.** Solve for the source position and translation in NDC space (Eq. 2).
-4. **Volume rendering.** Accumulate opacity and colour front-to-back along each ray using the
-   volume-rendering equation (Eq. 3), reusing density for both terms (Eq. 4).
-5. **Reversed accumulation.** Raymarch back-to-front (reversed from the typical graphics order) so
-   absorbing structures like bone come out bright, then reduce to the final per-ray opacity
-   (Eq. 5) — the value used as the rendered pixel.
+## Contents
 
-<figure>
-<img src="../../assets/results/method_crops/dvr.png" alt="DVR rendered chest DRR, AP view" width="360">
-<figcaption>Actual DVR output on the same CT/geometry as the Plastimatch reference. Despite starting from a completely different equation (the graphics volume-rendering equation, Eq 3, rather than Beer-Lambert directly), the reversed-accumulation trick (Eq 5) converges to a visually near-identical result once enough samples are taken along each ray.</figcaption>
-</figure>
+1. [Camera placement](#1-camera-placement)
+2. [Sampling the ray](#2-sampling-the-ray)
+3. [What the compositing step computes](#3-what-the-compositing-step-computes)
+4. [Empirical behaviour](#4-empirical-behaviour)
+5. [Limitations](#5-limitations)
+6. [Mapping to the code](#6-mapping-to-the-code)
+7. [References](#7-references)
 
-<figure>
-<svg viewBox="0 0 600 300" width="100%" style="max-width:600px;font-family:-apple-system,Segoe UI,Roboto,sans-serif" role="img" aria-labelledby="dvrov-title dvrov-desc">
-<title id="dvrov-title">One pixel's ray, shown passing through the volume in perspective</title>
-<desc id="dvrov-desc">A camera casts a ray through a 3D volume to a detector plane; samples along that one highlighted ray accumulate opacity as they go, becoming the circled pixel.</desc>
-<rect x="20" y="20" width="260" height="260" fill="none" stroke="#93c5fd" stroke-width="1.5"></rect>
-<image href="../../assets/results/method_crops/dvr_small.png" x="20" y="20" width="260" height="260"></image>
-<circle cx="150" cy="165" r="7" fill="none" stroke="#facc15" stroke-width="3"></circle>
-<path d="M157,165 C230,165 250,150 300,150" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4 3" fill="none"></path>
-<rect x="300" y="20" width="280" height="260" rx="8" fill="#fafbfc" stroke="#93c5fd" stroke-width="1.5"></rect>
-<text x="440" y="40" text-anchor="middle" font-size="11.5" fill="#1e3a5f" font-weight="600">this pixel's ray, in perspective</text>
-<path d="M430,88 L530,88 L530,198 L430,198 Z" fill="#eff6ff" fill-opacity="0.5" stroke="#93c5fd" stroke-width="1.5"></path>
-<path d="M400,110 L500,110 L500,220 L400,220 Z" fill="#eff6ff" fill-opacity="0.85" stroke="#93c5fd" stroke-width="1.5"></path>
-<path d="M400,110 L430,88 M500,110 L530,88 M400,220 L430,198 M500,220 L530,198" stroke="#93c5fd" stroke-width="1.5"></path>
-<text x="465" y="78" text-anchor="middle" font-size="10.5" fill="#5b7897">volume</text>
-<path d="M312,155 L312,175 L328,165 Z" fill="#1e3a5f"></path>
-<text x="305" y="145" text-anchor="end" font-size="10" fill="#64748b">camera</text>
-<path d="M570,105 V225" stroke="#334155" stroke-width="1.5"></path>
-<text x="567" y="102" text-anchor="end" font-size="10" fill="#64748b">detector</text>
-<path d="M328,172 L570,190" stroke="#94a3b8" stroke-width="1.5" fill="none"></path>
-<path d="M328,165 L570,165" stroke="#94a3b8" stroke-width="1.5" fill="none"></path>
-<circle cx="570" cy="190" r="3" fill="#94a3b8"></circle>
-<circle cx="570" cy="165" r="3" fill="#94a3b8"></circle>
-<path d="M328,158 L570,140" stroke="#d97706" stroke-width="2" fill="none"></path>
-<circle cx="376" cy="154" r="4" fill="#d97706" fill-opacity="0.2"></circle>
-<circle cx="425" cy="151" r="4" fill="#d97706" fill-opacity="0.4"></circle>
-<circle cx="473" cy="147" r="4" fill="#d97706" fill-opacity="0.6"></circle>
-<circle cx="522" cy="144" r="4" fill="#d97706" fill-opacity="0.8"></circle>
-<circle cx="570" cy="140" r="4.5" fill="#d97706"></circle>
-<text x="570" y="130" text-anchor="middle" font-size="10" fill="#8a6d1f" font-weight="600">this pixel</text>
-</svg>
-<figcaption>The circled pixel in the real DVR render (left) is one camera ray (amber, right) passing through the volume to the detector — the four faint-to-solid dots along it are the same six-sample accumulation from the diagram above, just drawn along the actual 3D ray instead of unrolled into a row. Every other pixel is a different parallel ray through the same volume, landing at a different point on the detector plane.</figcaption>
-</figure>
+---
 
-<figure>
-<svg viewBox="0 0 360 165" width="100%" style="max-width:360px;font-family:-apple-system,Segoe UI,Roboto,sans-serif" role="img" aria-labelledby="dvrex-title dvrex-desc">
-<title id="dvrex-title">Front-to-back opacity accumulation</title>
-<desc id="dvrex-desc">Six samples along one ray, each with density reused as opacity; the remaining transmittance bar shrinks toward zero as the accumulated opacity approaches one.</desc>
-<defs>
-<marker id="dvrex-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
-<path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"></path>
-</marker>
-</defs>
-<path d="M10,50 H345" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#dvrex-arrow)"></path>
-<text x="10" y="42" font-size="10.5" fill="#64748b">ray march, k = 1…N</text>
-<rect x="20" y="60" width="46" height="46" fill="#2b6cb0" fill-opacity="0.15" stroke="#93c5fd"></rect>
-<rect x="74" y="60" width="46" height="46" fill="#2b6cb0" fill-opacity="0.35" stroke="#93c5fd"></rect>
-<rect x="128" y="60" width="46" height="46" fill="#2b6cb0" fill-opacity="0.60" stroke="#93c5fd"></rect>
-<rect x="182" y="60" width="46" height="46" fill="#2b6cb0" fill-opacity="0.80" stroke="#93c5fd"></rect>
-<rect x="236" y="60" width="46" height="46" fill="#2b6cb0" fill-opacity="0.50" stroke="#93c5fd"></rect>
-<rect x="290" y="60" width="46" height="46" fill="#2b6cb0" fill-opacity="0.25" stroke="#93c5fd"></rect>
-<text x="43" y="52" font-size="9.5" fill="#94a3b8">1</text>
-<text x="97" y="52" font-size="9.5" fill="#94a3b8">2</text>
-<text x="151" y="52" font-size="9.5" fill="#94a3b8">3</text>
-<text x="205" y="52" font-size="9.5" fill="#94a3b8">4</text>
-<text x="259" y="52" font-size="9.5" fill="#94a3b8">5</text>
-<text x="313" y="52" font-size="9.5" fill="#94a3b8">6</text>
-<text x="43" y="119" text-anchor="middle" font-size="10" fill="#1e3a5f" font-weight="600">0.15</text>
-<text x="97" y="119" text-anchor="middle" font-size="10" fill="#1e3a5f" font-weight="600">0.45</text>
-<text x="151" y="119" text-anchor="middle" font-size="10" fill="#1e3a5f" font-weight="600">0.78</text>
-<text x="205" y="119" text-anchor="middle" font-size="10" fill="#1e3a5f" font-weight="600">0.96</text>
-<text x="259" y="119" text-anchor="middle" font-size="10" fill="#1e3a5f" font-weight="600">0.98</text>
-<text x="313" y="119" text-anchor="middle" font-size="10" fill="#1e3a5f" font-weight="600">0.98</text>
-<text x="0" y="139" font-size="10.5" fill="#64748b">Tₖ</text>
-<rect x="20" y="133" width="46" height="10" fill="#eef2f7" stroke="#cbd5e1" stroke-width="0.5"></rect>
-<rect x="74" y="133" width="46" height="10" fill="#eef2f7" stroke="#cbd5e1" stroke-width="0.5"></rect>
-<rect x="128" y="133" width="46" height="10" fill="#eef2f7" stroke="#cbd5e1" stroke-width="0.5"></rect>
-<rect x="182" y="133" width="46" height="10" fill="#eef2f7" stroke="#cbd5e1" stroke-width="0.5"></rect>
-<rect x="236" y="133" width="46" height="10" fill="#eef2f7" stroke="#cbd5e1" stroke-width="0.5"></rect>
-<rect x="290" y="133" width="46" height="10" fill="#eef2f7" stroke="#cbd5e1" stroke-width="0.5"></rect>
-<rect x="20" y="133" width="39" height="10" fill="#64748b"></rect>
-<rect x="74" y="133" width="25" height="10" fill="#64748b"></rect>
-<rect x="128" y="133" width="10" height="10" fill="#64748b"></rect>
-<rect x="182" y="133" width="2" height="10" fill="#64748b"></rect>
-<rect x="236" y="133" width="1" height="10" fill="#64748b"></rect>
-<rect x="290" y="133" width="1" height="10" fill="#64748b"></rect>
-</svg>
-<figcaption>Illustrative: opacity <code>αₖ = ρₖ</code> (Eq 4) at each sample — darker fill means denser tissue. The number under each sample is the accumulated opacity so far (Eq 3, Eq 5); the bar below it is the remaining transmittance <code>Tₖ = Π(1-αⱼ)</code> — by sample 4 here, accumulated opacity has already reached 0.96, so almost none of the ray's original transmittance is left for samples 5-6 to contribute.</figcaption>
-</figure>
+## 1. Camera placement
 
-## Mathematical Formulation
+The library places the volume in a normalised cube, $`[-1,1]^3`$, rather than in millimetres, so
+the shared geometry of [CONVENTIONS.md](../CONVENTIONS.md) §1 is rescaled into that cube first. A
+volume of side $`L`$ millimetres spans 2 normalised units, so every distance is multiplied by
+$`2/L`$:
 
-**(1) NDC scaling.** With physical volume side length $L$:
+```math
+\mathrm{SAD}_{\text{n}} = \mathrm{SAD}\cdot\frac{2}{L},
+\qquad
+\mathbf{I}_{\text{n}} = \mathbf{I}_w\cdot\frac{2}{L}
+```
 
-$$
-\text{SDD}_{\text{ndc}} = \text{SDD}\cdot\frac{2}{L}, \qquad \text{SAD}_{\text{ndc}} = \text{SAD}\cdot\frac{2}{L}
-$$
+For the default volume, $`L = 360`$ mm, this puts the source 4.72 units from the isocenter. The
+camera's rotation is the look-at basis of [METHODOLOGY.md](../METHODOLOGY.md) §2.1, written in the
+library's left–up–forward convention, and its translation puts the camera centre at
+$`\mathbf{S}_{\text{n}} = \mathbf{I}_{\text{n}} - \mathrm{SAD}_{\text{n}}\,\mathbf{d}`$. The focal
+length in pixels, $`f = \mathrm{SDD}\,W/L`$ ([CONVENTIONS.md](../CONVENTIONS.md) §2), is a ratio of
+lengths, so it is computed from millimetres directly.
 
-**(2) Camera placement.** Screen-space focal length in pixels, for a $W\times H$ image over
-physical extent $L$:
+With the camera in place, every pixel has a ray. The next question is where along it the renderer
+looks.
 
-$$
-f_x=\frac{\text{SDD}}{L/W}, \qquad f_y=\frac{\text{SDD}}{L/H}
-$$
+## 2. Sampling the ray
 
-Source position in NDC: $S = I_{\text{ndc}} - \text{SAD}_{\text{ndc}}\cdot\mathbf{d}$, giving
-camera translation $T=-SR$ under a row-vector camera convention $X_{\text{cam}}=X_{\text{world}}R+T$.
+Each ray is sampled at $`N`$ points (320 by default), spaced evenly in *camera depth* — distance
+from the source measured along the view direction $`\mathbf{d}`$, not along the ray. The depths
+cover
 
-**(3) Volume rendering equation.** With per-sample opacity $\alpha_k$, colour $c_k$, and
-transmittance $T_k=\prod_{j<k}(1-\alpha_j)$:
+```math
+z \in \big[\mathrm{SAD}_{\text{n}} - 2,\ \mathrm{SAD}_{\text{n}} + 2\big]
+```
 
-$$
-C = \sum_k T_k\,\alpha_k\,c_k
-$$
+an interval 4 units deep centred on the isocenter. The volume is 2 units deep, so on the central
+ray about half the samples, roughly 160, fall inside it, 2.25 mm apart. At each sample point
+$`\mathbf{p}_k`$ the density is read by trilinear interpolation from the eight surrounding voxels;
+points outside the volume read zero.
 
-**(4) Density reuse.** Since a CT voxel has no meaningful colour, $\alpha_k=c_k=\rho_k$ (the local
-density).
+Spacing samples evenly in depth has one geometric consequence. A ray leaving the source at angle
+$`\theta`$ to the central axis travels $`\Delta z / \cos\theta`$ between consecutive samples, so the
+true step length differs from ray to ray:
 
-**(5) Final opacity (Beer-Lambert equivalence).**
+```math
+\Delta l = \frac{\Delta z}{\cos\theta},
+\qquad
+\Delta z = \frac{4}{N - 1}
+```
 
-$$
-\text{opacity} = 1-\prod_k(1-\rho_k)
-$$
+For the default geometry $`\theta`$ reaches 14° at the image corners, where the step is 3% longer
+than on the central ray. §3 uses this step length explicitly.
 
-which is a Riemann-sum discretisation of $\exp(-\int\mu\,dl)$'s complement, computed via a reversed
-running product of $(1-\rho_k)$ from the far end of the ray backwards (mathematically equivalent to
-the direct product above). The number of sample points controls how well this approximates the true
-integral: too few under-resolves fine structure; past some point, adding more barely changes the
-result because the sum has already converged.
+<p align="center">
+  <img src="../../assets/figures/dvr_sampling_geometry.png" width="640" alt="A central ray and an oblique ray from the same source, crossed by sample planes spaced Δz apart; the segment between two samples on the oblique ray is longer, Δz divided by cos θ">
+  <br><em>Figure 2. Sampling in camera depth. Both rays cross the same planes, Δz apart, but the oblique ray (θ = 25° here for clarity; at most 14° by default) travels Δz / cos θ between samples.</em>
+</p>
+
+## 3. What the compositing step computes
+
+### 3.1 The textbook model, and why it is wrong for X-rays
+
+A graphics volume renderer treats each sample as a thin, semi-transparent slab with an **opacity**
+$`\alpha_k \in [0,1]`$, the fraction of light the slab blocks, and a **colour** $`c_k`$, the light
+it emits. Light from sample $`k`$ is dimmed by every slab in front of it, so it reaches the eye with
+weight $`T_k\alpha_k`$, where $`T_k`$ is the **transmittance** in front of the sample [2]:
+
+```math
+C = \sum_{k=1}^{N} T_k\,\alpha_k\,c_k,
+\qquad
+T_k = \prod_{j<k}\big(1-\alpha_j\big)
+```
+
+This is the right model for fog, where near material hides far material. It is the wrong one for a
+radiograph: there, the detector records how much was removed along the *whole* ray, and a dense
+structure in front does not hide one behind it. Applied literally, with density as both opacity
+and colour, the image would show mainly the first dense structure each ray meets.
+
+### 3.2 The line integral this renderer computes
+
+The renderer's own raymarcher drops the transmittance term and weights each sample by its step
+length:
+
+```math
+C = \sum_{k} \alpha_k\,c_k\,\Delta l
+```
+
+Every benchmark call passes the density volume as the colour field, $`c_k = \rho_k`$, and no
+separate opacity volume, in which case the opacity field is 1 inside the volume and, after
+interpolation, 0 outside it. Substituting both:
+
+```math
+C = \Delta l \sum_{k\,\in\,\text{volume}} \rho(\mathbf{p}_k) \;\approx\; \int \rho\, dl
+```
+
+— the Riemann sum of the density line integral, the same quantity Plastimatch computes exactly,
+up to the constant of [METHODOLOGY.md](../METHODOLOGY.md) §3.1.
+
+<p align="center">
+  <img src="../../assets/figures/dvr_weights_comparison.png" width="560" alt="Bar chart for a twelve-sample synthetic ray: density per sample, the contribution each sample would make under textbook compositing, and its contribution under this renderer's line integral, which equals the density">
+  <br><em>Figure 3. Contribution of each sample to the pixel along one synthetic 12-sample ray. Under textbook compositing with opacity equal to density (blue), samples behind the dense peak at k = 6–7 are almost completely hidden. Under the line integral this renderer computes (orange), each sample contributes its density, so the pixel is the sum of the grey bars.</em>
+</p>
+
+### 3.3 How this differs from the code it was ported from
+
+The raymarcher was adapted from an earlier X-ray renderer built on the same library, whose
+compositing applied the transmittance product of §3.1 with its shift reversed. With that shift
+the product evaluates to 1 for every sample but one, so the code in fact computed
+$`\sum_k \alpha_k c_k`$ — already a sum of density, though not because it was written as one. Two
+things were missing. The step length was left out, so the $`1/\cos\theta`$ factor of §2 entered
+every pixel as a darkening towards the corners, by 3% in the current geometry and by 9% with the
+earlier, inflated volume ([DATA.md](../DATA.md) §1.3). And the code described itself as
+back-to-front compositing, which it did not perform. The current raymarcher computes §3.2's sum
+directly.
+
+## 4. Empirical behaviour
+
+If §3 is right, DVR's output is a Riemann sum, so it should converge as $`N`$ grows and stop
+changing once the samples are dense compared with the voxels.
+
+<p align="center">
+  <img src="../../assets/figures/dvr_npts_sweep.png" width="640" alt="DVR renders at N = 8, 32, 128 and 320, each with its SSIM against an N = 512 render">
+  <br><em>Figure 4. Renders of the example CT at increasing sample count N, each scored by SSIM against an N = 512 render. At N = 8 only about four samples land inside the volume and fine structure is lost (SSIM 0.44); by N = 128, about one sample per two voxels on the central ray, the image has converged (SSIM 0.99).</em>
+</p>
+
+It does, and at the sample density where interpolating between samples stops missing structure —
+the behaviour of an integral being discretised. The default, $`N = 320`$, is past that point.
+
+<p align="center">
+  <img src="../../assets/results/method_crops/dvr.png" width="360" alt="DVR rendered chest DRR, AP view">
+  <br><em>Figure 5. DVR's output at the default N = 320, on the same CT and geometry as the Plastimatch reference.</em>
+</p>
+
+Against the Plastimatch benchmark reference this render has RMSE 0.008 and SSIM 0.985
+([RESULTS.md](../RESULTS.md) §4). Those are, to three decimals, the scores of DiffDRR's sampled
+trilinear mode, which computes the same trilinear Riemann sum by a completely separate
+implementation ([DiffDRR](diffdrr.md) §2.2) — direct confirmation of §3.2. The remaining
+difference from the exact integral is consistent with the smoothing trilinear interpolation applies at
+sharp edges, which grows as output pixels shrink relative to voxels: SSIM is 0.990 at 128×128 and 0.969 at
+1024×1024 ([RESULTS.md](../RESULTS.md) §7). Across the six views of the multi-view sweep DVR stays
+between 0.985 and 0.993 ([RESULTS.md](../RESULTS.md) §6).
+Because every operation above is differentiable, DVR is also one of the two renderers used for
+pose registration, where it recovers a 15° error to within 0.2° in 29 iterations
+([RESULTS.md](../RESULTS.md) §5).
+
+## 5. Limitations
+
+- **Sampled, not exact.** Trilinear interpolation smooths sharp edges slightly; the renderer cannot
+  reproduce the voxel-exact lengths of Siddon's algorithm.
+- **Fixed depth window.** Samples cover $`\mathrm{SAD} \pm L`$ along the view direction. A volume
+  that is not centred on the isocenter by much more than $`L/2`$ would be partly cut off.
+- **Memory grows with samples.** Every sample of every ray is held for the backward pass: about
+  17 GB at 1024×1024 with 320 samples ([RESULTS.md](../RESULTS.md) §3).
+
+## 6. Mapping to the code
+
+| Concept | Where it lives |
+|---|---|
+| Entry point | `build_dvr_renderer` (`src/drr/renderers/dvr.py`), returning an `ObjectCentricXRayVolumeRenderer` and its `PerspectiveCameras` |
+| §1 normalised camera | `build_dvr_renderer`: `sdd_ndc`, `sad_ndc`, `R`, `T`, focal length `fx`, `fy` |
+| §2 depth range and sample count | `min_depth = sad_ndc - 2`, `max_depth = sad_ndc + 2`, `n_pts_per_ray` (default 320, `--n-pts`); PyTorch3D's `NDCMultinomialRaysampler`, un-stratified |
+| §3.2 constant opacity | `BaseXRayVolumeRenderer.forward`, `opacity=None` branch; every call in `src/drr/benchmarks.py` uses it |
+| §3.2 line integral | `AbsorptionEmissionRaymarcher.forward`: per-ray step from `ray_bundle.lengths` and `ray_bundle.directions` |
+| §4 sample-count sweep | `run_dvr_sampling_ablation` (`src/drr/benchmarks.py`), `--dvr-npts` |
+
+## 7. References
+
+1. N. Ravi et al. Accelerating 3D Deep Learning with PyTorch3D. *arXiv:2007.08501*, 2020.
+2. N. Max. Optical models for direct volume rendering. *IEEE Transactions on Visualization and
+   Computer Graphics* 1(2), 1995.

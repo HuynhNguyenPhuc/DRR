@@ -1,187 +1,185 @@
-# Plastimatch
+# Plastimatch: Exact Ray–Voxel Integration
 
 *(part of [Methodology](../METHODOLOGY.md))*
 
-Plastimatch evaluates the Beer-Lambert integral exactly, using Siddon's ray-tracing algorithm to
-compute the precise geometric intersection of each ray with every voxel it crosses. Because the
-integral is solved with no discretisation error and no scatter or spectral modeling, it serves as
-the ground-truth reference the other four methods are compared against.
+Plastimatch is the benchmark reference every other renderer in this suite is scored against. It
+evaluates the single-energy line integral of [METHODOLOGY.md](../METHODOLOGY.md) §1 exactly, with
+Siddon's ray–voxel intersection algorithm [3]: for every ray it finds the true length of the ray
+inside each voxel, so no sampling step and no interpolation enter the result. It models no
+spectrum and no scatter. Because its attenuation is proportional to the stored density, it is the
+reference member of the *linear* group of [METHODOLOGY.md](../METHODOLOGY.md) §3.3.
 
-## Algorithm
+<p align="center">
+  <img src="../../assets/figures/plastimatch_pipeline.png" width="900" alt="Pipeline on the example CT: 3D volume, an axial slice of attenuation, a close-up of one ray crossing the voxel grid with its Siddon intersection points, the attenuation times length of each segment, and the resulting DRR">
+  <br><em>Figure 1. Plastimatch's pipeline on the example CT. The close-up follows one ray through the boxed 10×10-voxel patch; each coloured segment is one exact ray–voxel length, and the bars are μᵢlᵢ for those segments. The lengths are exact; the voxel representation (attenuation constant inside each voxel) and the linear HU calibration are modelling assumptions.</em>
+</p>
 
-1. **Density → HU.** Convert the volume's normalised density $\rho \in [0,1]$ to Hounsfield Units
-   via a fixed linear map (Eq. 1).
-2. **Ray–voxel intersection.** For each ray from the source to a detector pixel, find every point
-   at which the ray crosses a voxel-grid boundary plane, using Siddon's algorithm (Eq. 2). This
-   yields, for every voxel the ray passes through, the exact length of the ray's chord inside that
-   voxel.
-3. **HU → attenuation.** Convert each crossed voxel's HU value to a linear attenuation coefficient
-   $\mu$ using the standard calibration (Eq. 3).
-4. **Line integral.** Sum each voxel's $\mu$ weighted by its exact chord length, giving the exact
-   line integral $\int \mu\,dl$ (Eq. 4) — with no sampling error, since the chord lengths are exact
-   rather than approximated at fixed steps.
-5. **Transmission → image.** Apply Beer-Lambert (Eq. 5) to convert the line integral to
-   transmission, then min-max normalise the resulting image to $[0,1]$.
+## Contents
 
-`generate_plastimatch_drr` doesn't call any Python ray-tracing code at all — every step above runs
-inside the external `plastimatch drr` CLI, invoked as a subprocess. For the default geometry
-(`DEFAULT_GEOMETRY`) at 200×200 on a 128×2mm CT volume, the actual command is:
+1. [Density to attenuation](#1-density-to-attenuation)
+2. [Exact ray–voxel intersection](#2-exact-rayvoxel-intersection)
+3. [The line integral and the output](#3-the-line-integral-and-the-output)
+4. [Empirical behaviour](#4-empirical-behaviour)
+5. [Limitations](#5-limitations)
+6. [Mapping to the code](#6-mapping-to-the-code)
+7. [References](#7-references)
 
+---
+
+## 1. Density to attenuation
+
+Plastimatch reads a CT volume in Hounsfield units, so the stored density $`\rho \in [0,1]`$ is
+first decoded with $`\mathrm{HU} = 4000\rho - 1000`$, which recovers the scan's original HU between
+−800 and 3000 ([DATA.md](../DATA.md) §1.2). Plastimatch then converts each voxel's HU value to a linear
+attenuation coefficient with the standard calibration [2], except that it treats everything at or
+below −800 HU as air:
+
+```math
+\mu(\mathrm{HU}) =
+\begin{cases}
+0, & \mathrm{HU} \le -800 \\
+\mu_{\text{water}}\left(1 + \dfrac{\mathrm{HU}}{1000}\right), & \mathrm{HU} > -800
+\end{cases}
+\qquad
+\mu_{\text{water}} = 0.022\ \text{mm}^{-1}
 ```
-plastimatch drr -i exact -t pfm \
-  -I <ct-volume>.mha -O <out-dir>/drr \
-  -r 200 200 -z 256.00 256.00 \
-  -o 0.0 0.0 0.0 \
-  --sid 1020.0 --sad 850.0 \
-  -n -0.0 -1.0 -0.0 --vup 0.0 0.0 1.0
+
+Both details come from Plastimatch's source code, whose comment gives the reason for the
+constant: the mass attenuation coefficient of water at 50 keV is 0.22 cm²/g [1], which for
+density 1 g/cm³ is 0.22 cm⁻¹, or 0.022 mm⁻¹. That is a diagnostic-radiography energy. The formula
+was also checked by rendering slabs of a single material at several thicknesses: the recovered
+$`\mu`$ does not depend on thickness and grows linearly with HU, exactly as above.
+
+Combined with the density encoding, the two cases collapse into one:
+
+```math
+\mu = 4\,\mu_{\text{water}}\,\rho
 ```
 
-`-i exact` selects the Siddon algorithm described above (as opposed to `-i uniform`, a fixed-step
-sampler plastimatch also offers, unused here). `-n` is the detector *normal* — the negation of
-`view_dir`, per the gotcha in `CLAUDE.md` — which is why it reads `-0.0 -1.0 -0.0` rather than
-matching `view_dir` directly. `--sid`/`--sad` are exactly the SDD/SAD from
-[the shared geometry](../METHODOLOGY.md#shared-imaging-geometry). Ground truth is generated by a
-real, independent, no-Python-in-the-loop implementation of this same physics — not a from-scratch
-reimplementation subject to the same bugs as the renderers it's the reference for.
+for every voxel, because the encoding stores exactly 0 wherever the cutoff applies. The value of
+$`\mu_{\text{water}}`$ therefore only scales the whole image, and the min–max normalisation applied
+before every comparison removes any scale ([METHODOLOGY.md](../METHODOLOGY.md) §3.2). What
+remains to be computed is the integral itself.
 
-<figure>
-<img src="../../assets/results/method_crops/plastimatch.png" alt="Plastimatch rendered chest DRR, AP view" width="360">
-<figcaption>Actual Plastimatch output on the benchmark's example chest CT (200×200, AP view) — the ground-truth reference every other method in this comparison is scored against. Cropped from <code>assets/results/quality_comparison.png</code>; see <code>README.md</code> §"Sample results" for the side-by-side RMSE/PSNR/SSIM.</figcaption>
-</figure>
+## 2. Exact ray–voxel intersection
 
-<figure>
-<svg viewBox="0 0 600 300" width="100%" style="max-width:600px;font-family:-apple-system,Segoe UI,Roboto,sans-serif" role="img" aria-labelledby="pmov-title pmov-desc">
-<title id="pmov-title">One pixel of the real output, traced back to the ray-integral computation</title>
-<desc id="pmov-desc">A single pixel in the actual rendered image is the result of one ray's exact line integral through the voxel grid, shown at right.</desc>
-<rect x="20" y="20" width="260" height="260" fill="none" stroke="#93c5fd" stroke-width="1.5"></rect>
-<image href="../../assets/results/method_crops/plastimatch_small.png" x="20" y="20" width="260" height="260"></image>
-<circle cx="150" cy="165" r="7" fill="none" stroke="#facc15" stroke-width="3"></circle>
-<path d="M157,165 C230,165 250,150 300,150" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4 3" fill="none"></path>
-<rect x="300" y="20" width="280" height="260" rx="8" fill="#fafbfc" stroke="#93c5fd" stroke-width="1.5"></rect>
-<text x="440" y="40" text-anchor="middle" font-size="11.5" fill="#1e3a5f" font-weight="600">this pixel's ray-integral trace</text>
-<text x="320" y="66" font-size="10.5" font-weight="600" fill="#1e3a5f">k</text>
-<text x="365" y="66" text-anchor="middle" font-size="10.5" font-weight="600" fill="#1e3a5f">αₖ</text>
-<text x="425" y="66" text-anchor="middle" font-size="10.5" font-weight="600" fill="#1e3a5f">lₖ (mm)</text>
-<text x="495" y="66" text-anchor="middle" font-size="10.5" font-weight="600" fill="#1e3a5f">μₖ (mm⁻¹)</text>
-<text x="562" y="66" text-anchor="middle" font-size="10.5" font-weight="600" fill="#1e3a5f">μₖ·lₖ</text>
-<path d="M312,73 H568" stroke="#93c5fd" stroke-width="1"></path>
-<g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="#334155">
-<text x="320" y="92">1</text>
-<text x="365" y="92" text-anchor="middle">0.11</text>
-<text x="425" y="92" text-anchor="middle">1.9</text>
-<text x="495" y="92" text-anchor="middle">0.019</text>
-<text x="562" y="92" text-anchor="middle">0.036</text>
-<text x="320" y="114">2</text>
-<text x="365" y="114" text-anchor="middle">0.28</text>
-<text x="425" y="114" text-anchor="middle">2.3</text>
-<text x="495" y="114" text-anchor="middle">0.031</text>
-<text x="562" y="114" text-anchor="middle">0.071</text>
-<text x="320" y="136">3</text>
-<text x="365" y="136" text-anchor="middle">0.45</text>
-<text x="425" y="136" text-anchor="middle">1.6</text>
-<text x="495" y="136" text-anchor="middle">0.019</text>
-<text x="562" y="136" text-anchor="middle">0.030</text>
-<text x="320" y="158">4</text>
-<text x="365" y="158" text-anchor="middle">0.63</text>
-<text x="425" y="158" text-anchor="middle">2.1</text>
-<text x="495" y="158" text-anchor="middle">0.042</text>
-<text x="562" y="158" text-anchor="middle">0.088</text>
-<text x="320" y="180">5</text>
-<text x="365" y="180" text-anchor="middle">0.82</text>
-<text x="425" y="180" text-anchor="middle">1.4</text>
-<text x="495" y="180" text-anchor="middle">0.019</text>
-<text x="562" y="180" text-anchor="middle">0.027</text>
-</g>
-<path d="M312,192 H568" stroke="#93c5fd" stroke-width="1"></path>
-<text x="320" y="214" font-size="11.5" font-weight="700" fill="#1e3a5f">Σ μₖ·lₖ ≈ 0.252</text>
-<text x="320" y="234" font-size="10" fill="#64748b">→ T = exp(-0.252) ≈ 0.777</text>
-</svg>
-<figcaption>The circled pixel in the real Plastimatch render (left) is the output of exactly one ray — the inset (right) is that ray's actual Siddon trace: each row is one voxel crossing, with its exact chord length <code>lₖ</code> (Eq 2) and attenuation <code>μₖ</code> (Eq 3, higher where the ray crosses bone). The running sum <code>Σμₖlₖ</code> (Eq 4) is the line integral that Beer-Lambert (Eq 5) turns into this one pixel's brightness — repeated independently, once per pixel, across the whole 200×200 image.</figcaption>
-</figure>
+Inside one voxel, attenuation is constant, so the integral along a ray is exactly a sum: each
+voxel's $`\mu`$ times the length of the ray inside that voxel. Siddon's algorithm [3] finds those
+lengths without stepping along the ray.
 
-<figure>
-<svg viewBox="0 0 370 250" width="100%" style="max-width:370px;font-family:-apple-system,Segoe UI,Roboto,sans-serif" role="img" aria-labelledby="pmex-title pmex-desc">
-<title id="pmex-title">Siddon ray-voxel intersection</title>
-<desc id="pmex-desc">A ray from source to detector crosses a grid of voxels; Siddon's algorithm finds every grid-line crossing along it and computes the exact chord length inside each voxel between consecutive crossings.</desc>
-<defs>
-<marker id="pmex-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
-<path d="M0,0 L10,5 L0,10 z" fill="#2b6cb0"></path>
-</marker>
-</defs>
-<rect x="40" y="190" width="40" height="40" fill="#dbeafe"></rect>
-<rect x="80" y="150" width="40" height="40" fill="#dbeafe"></rect>
-<rect x="120" y="150" width="40" height="40" fill="#dbeafe"></rect>
-<rect x="160" y="110" width="40" height="40" fill="#dbeafe"></rect>
-<rect x="200" y="110" width="40" height="40" fill="#dbeafe"></rect>
-<rect x="240" y="70" width="40" height="40" fill="#dbeafe"></rect>
-<rect x="280" y="70" width="40" height="40" fill="#dbeafe"></rect>
-<path d="M40,30 V230 M80,30 V230 M120,30 V230 M160,30 V230 M200,30 V230 M240,30 V230 M280,30 V230 M320,30 V230" stroke="#cbd5e1" stroke-width="1"></path>
-<path d="M40,30 H320 M40,70 H320 M40,110 H320 M40,150 H320 M40,190 H320 M40,230 H320" stroke="#cbd5e1" stroke-width="1"></path>
-<path d="M10,205 L350,55" stroke="#2b6cb0" stroke-width="2" fill="none" marker-end="url(#pmex-arrow)"></path>
-<circle cx="40" cy="192" r="3" fill="#1e3a5f"></circle>
-<circle cx="80" cy="174" r="3" fill="#1e3a5f"></circle>
-<circle cx="120" cy="157" r="3" fill="#1e3a5f"></circle>
-<circle cx="160" cy="139" r="3" fill="#1e3a5f"></circle>
-<circle cx="200" cy="121" r="3" fill="#1e3a5f"></circle>
-<circle cx="240" cy="104" r="3" fill="#1e3a5f"></circle>
-<circle cx="280" cy="86" r="3" fill="#1e3a5f"></circle>
-<circle cx="320" cy="68" r="3" fill="#1e3a5f"></circle>
-<text x="0" y="222" font-size="10.5" fill="#64748b">source</text>
-<text x="322" y="46" font-size="10.5" fill="#64748b">detector</text>
-<text x="46" y="176" font-size="11" fill="#1e3a5f" font-weight="600">l₁</text>
-<text x="166" y="126" font-size="11" fill="#1e3a5f" font-weight="600">l₂</text>
-</svg>
-<figcaption>Siddon's algorithm (Eq 2), illustrated: the ray's straight-line path is intersected against every voxel-grid boundary it crosses (dots), giving the exact chord length <code>lᵢ</code> inside each traversed voxel (shaded) between one crossing and the next — no fixed step size, no sampling. This is simplified to one crossing per grid column for clarity; the real algorithm finds crossings against all three axes.</figcaption>
-</figure>
+Write the ray from the source $`\mathbf{p}_0`$ to a detector pixel $`\mathbf{p}_1`$ as
 
-## Mathematical Formulation
+```math
+\mathbf{p}(\alpha) = \mathbf{p}_0 + \alpha\,(\mathbf{p}_1 - \mathbf{p}_0),
+\qquad \alpha \in [0,1]
+```
 
-**(1) Density-to-HU mapping.**
+The voxel grid is bounded by evenly spaced planes perpendicular to the $`X`$, $`Y`$ and $`Z`$
+axes. The algorithm proceeds in four steps.
 
-$$
-\text{HU}(\rho) = 4000\rho - 1000
-$$
+**1. Clip to the volume.** Intersecting the ray with the grid's six outer faces gives the values
+$`\alpha_{\min}`$ and $`\alpha_{\max}`$ at which it enters and leaves the volume.
 
-so $\rho = 0 \to -1000$ HU (air) and $\rho = 1 \to +3000$ HU (cortical bone).
+**2. List the plane crossings.** Within $`[\alpha_{\min}, \alpha_{\max}]`$ the ray crosses each
+family of parallel planes at evenly spaced values of $`\alpha`$, because the planes are evenly
+spaced. Each family therefore gives an arithmetic sequence, computed directly.
 
-**(2) Siddon's algorithm.** A ray is parametrised as
-$\mathbf{p}(\alpha) = \mathbf{p}_0 + \alpha(\mathbf{p}_1-\mathbf{p}_0)$, $\alpha\in[0,1]$. Siddon's
-algorithm finds every $\alpha$ at which the ray crosses an axis-aligned voxel-grid plane
-(separately in $X$, $Y$, $Z$), merges and sorts those crossings, and for each consecutive pair
-$(\alpha_k,\alpha_{k+1})$ computes the exact chord length through the voxel that segment lies in:
+**3. Merge.** Sorting the three sequences into one list
+$`\alpha_{\min} = \alpha_0 < \alpha_1 < \dots < \alpha_n = \alpha_{\max}`$ splits the ray into
+segments that each lie inside exactly one voxel.
 
-$$
-l_k = (\alpha_{k+1}-\alpha_k)\cdot\lVert\mathbf{p}_1-\mathbf{p}_0\rVert
-$$
+**4. Measure each segment.** The midpoint of segment $`k`$, $`\mathbf{p}\big((\alpha_k +
+\alpha_{k+1})/2\big)`$, lies strictly inside one voxel and so identifies it. The segment's length
+is
 
-**(3) HU-to-attenuation calibration.**
+```math
+l_k = (\alpha_{k+1} - \alpha_k)\,\lVert \mathbf{p}_1 - \mathbf{p}_0 \rVert
+```
 
-$$
-\mu = \mu_{\text{water}}\cdot\left(1+\frac{\text{HU}}{1000}\right)
-$$
+Every $`l_k`$ is a true geometric distance, not an estimate from a step size, and nothing is
+interpolated. The number of segments equals the number of voxels the ray crosses, so the cost per
+ray grows linearly with the volume's size, and there is no sample count to choose: a thin
+structure cannot fall between two samples, because there are no samples.
 
-Verified empirically with single-material slab phantoms of varying thickness: the recovered $\mu$
-is thickness-independent and scales linearly with HU exactly per this formula. One caveat: the
-fitted $\mu_{\text{water}}\approx0.0220\ \text{cm}^{-1}$ matches NIST XCOM water at ~10 MeV
-(megavoltage), not the ~60–80 keV of a real diagnostic X-ray — a calibration tuned for
-radiotherapy portal-image verification rather than diagnostic radiography. This affects only
-absolute photometric realism, not the geometry/ray-integration comparison between methods (see
-[Monte Carlo](monte_carlo.md) and [DeepDRR](deepdrr.md), which use their own energy-dependent
-tables).
+<p align="center">
+  <img src="../../assets/figures/plastimatch_siddon_grid.png" width="420" alt="Siddon's algorithm: a ray crossing a voxel grid, with chord lengths l1 and l2 marked at two crossings">
+  <br><em>Figure 2. Siddon's algorithm on a small 2D grid. The ray is cut at every grid line it crosses, and each piece is measured exactly. On this benchmark's 128-voxel volume, the central ray crosses 128 voxels.</em>
+</p>
 
-**(4) Exact line integral.**
+## 3. The line integral and the output
 
-$$
-\int \mu\,dl \approx \sum_i \mu_i \cdot l_i
-$$
+Summing each segment's attenuation times its length gives the line integral. Since attenuation is
+constant inside each voxel, this sum *is* the integral of the voxelised volume, not an
+approximation to it:
 
-summed over every voxel $i$ the ray crosses, using the chord lengths $l_i$ from Eq. (2) and the
-attenuation coefficients $\mu_i$ from Eq. (3). Because $l_i$ is exact rather than sampled at fixed
-steps, this sum has no discretisation error — the defining property that makes this method ground
-truth.
+```math
+\int \mu\, dl = \sum_k \mu_k\, l_k
+```
 
-**(5) Beer-Lambert transmission.**
+<p align="center">
+  <img src="../../assets/figures/plastimatch_ray_profile.png" width="560" alt="Real mu(l) plotted along one real ray through the example CT, with the area under the curve shaded as the line integral">
+  <br><em>Figure 3. Attenuation along one ray of the example CT, running parallel to the AP view direction, with §1's calibration applied. The ray passes close to the spine. The shaded area is the line integral, about 5.7, so only 0.3% of a 50&nbsp;keV beam would survive; the tall spike near 200&nbsp;mm is bone, and the gap between 135 and 152&nbsp;mm is lung below −800&nbsp;HU, which §1 treats as air.</em>
+</p>
 
-$$
-T = \exp\left(-\int \mu\,dl\right)
-$$
+Plastimatch can report either the line integral itself or the transmission
+$`T = \exp\left(-\int \mu\, dl\right)`$. This benchmark uses its default, the line integral, which
+is the attenuation display convention of [METHODOLOGY.md](../METHODOLOGY.md) §1. This
+convention was verified by requesting the transmission output and comparing it with
+$`\exp(-\text{line integral})`$ computed from the default output. The values agreed to six decimal
+places, so the default output is the Beer–Lambert exponent and nothing else.
+
+## 4. Empirical behaviour
+
+<p align="center">
+  <img src="../../assets/results/method_crops/plastimatch.png" width="360" alt="Plastimatch rendered chest DRR, AP view">
+  <br><em>Figure 4. Plastimatch's output on the example chest CT (200×200, AP view), the reference image for every comparison in <a href="../RESULTS.md">RESULTS.md</a>.</em>
+</p>
+
+Three properties of this image follow from §1–§3. Ribs and vertebral edges are sharp, because
+§2's exact lengths introduce no smoothing along the ray. Nothing is hazy around dense structures,
+because no scatter is modelled. And bone is bright while air is dark, because the image is the
+line integral of an attenuation that grows with density.
+
+The other two members of the linear group compute the same integral: [DiffDRR](diffdrr.md) with
+the same algorithm, [DVR](dvr.md) by sampling. DiffDRR reproduces this image to floating-point
+precision, and DVR to an RMSE of 0.008 ([RESULTS.md](../RESULTS.md) §4).
+
+## 5. Limitations
+
+- **Single energy, no scatter.** As the reference for this benchmark, which compares how
+  accurately renderers integrate the same density field in the same geometry, this is the right
+  choice. It is not a realistic radiograph: real diagnostic images show beam hardening and
+  scatter, which [Monte Carlo](monte_carlo.md) and [DeepDRR](deepdrr.md) attempt to model.
+- **One energy for every tissue.** §1 scales water's 50 keV attenuation by HU, which assumes every
+  tissue's attenuation varies with energy the way water's does. Bone does not — it attenuates
+  relatively more at low energy — so bone-to-tissue contrast in this image is not exactly that of
+  a 50 keV radiograph. This does not affect any normalised comparison with the renderers that
+  integrate the same density.
+- **Lung below −800 HU is air.** The cutoff of §1 removes the attenuation of most lung tissue.
+  The density encoding applies the same cutoff, so every renderer sees the same thing
+  ([DATA.md](../DATA.md) §1.2).
+- **CPU only, through an external program.** Plastimatch is invoked as a separate process for
+  every render, which makes it the reference rather than a practical renderer here; it is not in
+  the speed or memory benchmarks.
+
+## 6. Mapping to the code
+
+| Concept | Where it lives |
+|---|---|
+| Entry point | `generate_plastimatch_drr` (`src/drr/renderers/plastimatch.py`), which writes the volume to disk and runs the external `plastimatch drr` command; no ray tracing runs in this repository's Python |
+| §1 density to HU | `density_to_hu` (`src/drr/data.py`), applied before the volume is written for the command to read |
+| §1 HU to attenuation | Plastimatch's default `-P preprocess`; the lookup is `attenuation_lookup_hu` in Plastimatch's `src/reconstruct/drr.cxx` |
+| §2 exact intersection | `plastimatch drr -i exact` (the command also offers `-i uniform`, a fixed-step sampler, unused here) |
+| §3 output convention | No `-e` flag: line integral; adding `-e` gives the transmission |
+| Shared geometry | `--sid` (SDD), `--sad`, `-o` (isocenter), `-n` (detector normal, $`-\mathbf{d}`$), `--vup`, `-z` (detector size $`L`$); see [CONVENTIONS.md](../CONVENTIONS.md) §7.1 |
+| Temporary files | Written under the home directory, because a snap-confined Plastimatch cannot see the host's `/tmp` ([DEVELOPMENT_NOTES.md](../DEVELOPMENT_NOTES.md)) |
+
+## 7. References
+
+1. J.H. Hubbell, S.M. Seltzer. Tables of X-Ray Mass Attenuation Coefficients and Mass
+   Energy-Absorption Coefficients. *NIST Standard Reference Database 126*, National Institute of
+   Standards and Technology.
+2. J.T. Bushberg, J.A. Seibert, E.M. Leidholdt, J.M. Boone. *The Essential Physics of Medical
+   Imaging*, 4th ed. Wolters Kluwer.
+3. R.L. Siddon. Fast calculation of the exact radiological path for a three-dimensional CT array.
+   *Medical Physics* 12(2), 1985.
