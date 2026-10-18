@@ -25,7 +25,7 @@ def generate_plastimatch_drr(
     geometry: GeometryConfig = None,
 ) -> torch.Tensor | None:
     """
-    Generate a Ground Truth DRR using Plastimatch's exact ray-tracing algorithm.
+    Generate the benchmark-reference DRR using Plastimatch's exact ray-tracing algorithm.
 
     Args:
         volume_tensor (torch.Tensor): The CT density volume.

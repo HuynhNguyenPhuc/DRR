@@ -220,7 +220,7 @@ def generate_mc_drr(
     seed: int = 42,
 ) -> torch.Tensor | None:
     """
-    Generate a physics-informed reference DRR (NOT ground truth) via deterministic polychromatic ray-marching.
+    Generate a physics-informed reference DRR (not the benchmark reference) via deterministic polychromatic ray-marching.
 
     Args:
         volume_tensor (torch.Tensor): The CT density volume, in [0, 1].

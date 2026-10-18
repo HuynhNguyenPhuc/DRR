@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 
 # Shared density encoding: rho = (HU + 1000) / 4000 above the air cutoff, 0 at or below it.
 # The cutoff matches Plastimatch's HU-to-attenuation lookup, which returns 0 for HU <= -800,
-# so rho stays exactly proportional to the ground truth's attenuation.
+# so rho stays exactly proportional to the benchmark reference's attenuation.
 HU_MIN = -1000.0
 HU_MAX = 3000.0
 HU_AIR_CUTOFF = -800.0

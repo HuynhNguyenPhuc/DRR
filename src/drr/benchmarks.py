@@ -239,7 +239,7 @@ def run_vram(volume_tensor, subject, resolutions, n_pts, ct_size, voxel_spacing,
 def run_quality(volume_tensor, subject, n_pts, ct_size, voxel_spacing, device, out_dir):
     """
     Renders a fixed scene through all five engines and scores RMSE/PSNR/SSIM
-    against Plastimatch, the sole ground-truth renderer in this repo.
+    against Plastimatch, the benchmark reference in this repo.
 
     Args:
         volume_tensor: The CT density volume to render, already loaded into memory.
@@ -263,17 +263,17 @@ def run_quality(volume_tensor, subject, n_pts, ct_size, voxel_spacing, device, o
     images  = {}
     vol     = volume_tensor.to(device)
 
-    # ── Ground Truth reference ──────────────────────────────────────────────
+    # ── Benchmark reference ──────────────────────────────────────────────
 
-    # Plastimatch GT (exact geometric ray-tracing on CPU) — sole Ground Truth.
+    # Plastimatch (exact geometric ray-tracing on CPU) — the benchmark reference.
     img_plastimatch = generate_plastimatch_drr(volume_tensor, voxel_spacing, RES, device)
     if img_plastimatch is not None:
         images["plastimatch_gt"] = img_plastimatch
-        logger.info("    Plastimatch (GT)      rendered: shape %s", tuple(img_plastimatch.shape))
+        logger.info("    Plastimatch (reference)    rendered: shape %s", tuple(img_plastimatch.shape))
     else:
-        logger.warning("    Plastimatch (GT)      : FAILED")
+        logger.warning("    Plastimatch (reference)    : FAILED")
 
-    # Monte Carlo — not ground truth, so it's kept out of the "_gt" keys
+    # Monte Carlo — not the reference, so it is kept out of the "_gt" keys
     # below and scored *against* Plastimatch like everyone else.
     img_mc = generate_mc_drr(volume_tensor, voxel_spacing, RES, device)
     if img_mc is not None:
@@ -331,11 +331,11 @@ def run_quality(volume_tensor, subject, n_pts, ct_size, voxel_spacing, device, o
     else:
         logger.info("    DeepDRR           : UNAVAILABLE (requires deepdrr + CUDA/Linux)")
 
-    # ── Metrics vs Ground Truth ──────────────────────────────────────────────
-    # Plastimatch is the sole GT; Monte Carlo is scored against it too,
+    # ── Metrics vs the reference ──────────────────────────────────────────────
+    # Plastimatch is the sole reference; Monte Carlo is scored against it too,
     # under "monte_carlo" rather than a "_gt" key.
     GT_REFS = {
-        k: (v, k.replace("_", " ").replace("gt", "GT").title())
+        k: (v, k[:-3].replace("_", " ").title() + " (reference)")
         for k, v in images.items()
         if k.endswith("_gt")
     }
@@ -343,7 +343,7 @@ def run_quality(volume_tensor, subject, n_pts, ct_size, voxel_spacing, device, o
     logger.info("")
     for name, img in images.items():
         if name.endswith("_gt"):
-            continue   # skip GT-vs-GT comparisons
+            continue   # skip reference-vs-reference comparisons
 
         for ref_key, (ref_img, ref_label) in GT_REFS.items():
             rmse, psnr, ssim = compute_metrics(img, ref_img)
@@ -366,8 +366,8 @@ def run_quality(volume_tensor, subject, n_pts, ct_size, voxel_spacing, device, o
             im_np = img.detach().cpu().squeeze().numpy()
             im_np = (im_np - im_np.min()) / (im_np.max() - im_np.min() + 1e-8)
             ax.imshow(im_np, cmap="gray")
-            # Mark ground truth in the title
-            title = name.replace("_gt", " [GT]").replace("_", "\n")
+            # Mark the reference in the title
+            title = name.replace("_gt", " [reference]").replace("_", "\n")
             ax.set_title(title, fontsize=9)
             ax.axis("off")
 
@@ -706,7 +706,7 @@ def run_multiview(volume_tensor, subject, n_pts, ct_size, voxel_spacing, device,
         row_images.append((view_name, images))
 
         if "plastimatch_gt" not in images:
-            logger.warning("    Plastimatch GT unavailable for this view — skipping metrics.")
+            logger.warning("    Plastimatch reference unavailable for this view — skipping metrics.")
             results[view_name] = None
             continue
 
@@ -721,10 +721,10 @@ def run_multiview(volume_tensor, subject, n_pts, ct_size, voxel_spacing, device,
             logger.info("    %-16s SSIM=%.4f  PSNR=%6.2f dB  RMSE=%.4e", name, ssim, psnr, rmse)
         results[view_name] = view_results
 
-    # ── Summary table: SSIM vs Plastimatch GT, per view ─────────────────────
+    # ── Summary table: SSIM vs Plastimatch reference, per view ─────────────────────
     renderer_order = ["monte_carlo", "dvr", "diffdrr_siddon", "deepdrr"]
     logger.info("")
-    logger.info("  SSIM vs Plastimatch GT, per view:")
+    logger.info("  SSIM vs Plastimatch reference, per view:")
     logger.info("    %-28s" + "".join(f"  {r:>14s}" for r in renderer_order), "View")
     for view_name, view_results in results.items():
         if view_results is None:
@@ -758,7 +758,7 @@ def run_multiview(volume_tensor, subject, n_pts, ct_size, voxel_spacing, device,
                 for spine in ax.spines.values():
                     spine.set_visible(False)
                 if i == 0:
-                    ax.set_title(rname.replace("_gt", " [GT]").replace("_", " "), fontsize=10)
+                    ax.set_title(rname.replace("_gt", " [reference]").replace("_", " "), fontsize=10)
                 if j == 0:
                     ax.set_ylabel(view_name, fontsize=9)
 
@@ -806,7 +806,7 @@ def run_resolution_sweep(volume_tensor, subject, n_pts, ct_size, voxel_spacing, 
         # If Plastimatch itself fails, there's nothing to score against — skip this resolution.
         img_plastimatch = generate_plastimatch_drr(volume_tensor, voxel_spacing, res, device)
         if img_plastimatch is None:
-            logger.warning("    Plastimatch GT unavailable at this resolution — skipping.")
+            logger.warning("    Plastimatch reference unavailable at this resolution — skipping.")
             results[res] = None
             continue
         images["plastimatch_gt"] = img_plastimatch
@@ -875,8 +875,8 @@ def run_resolution_sweep(volume_tensor, subject, n_pts, ct_size, voxel_spacing, 
             ax_psnr.plot(xs, psnr_ys, marker="o", label=name)
 
         for ax, ylabel, title in [
-            (ax_ssim, "SSIM vs Plastimatch GT", "Quality vs Resolution — SSIM"),
-            (ax_psnr, "PSNR (dB) vs Plastimatch GT", "Quality vs Resolution — PSNR"),
+            (ax_ssim, "SSIM vs Plastimatch reference", "Quality vs Resolution — SSIM"),
+            (ax_psnr, "PSNR (dB) vs Plastimatch reference", "Quality vs Resolution — PSNR"),
         ]:
             ax.set_xscale("log", base=2)
             ax.set_xticks(valid_res)
@@ -927,7 +927,7 @@ def run_dvr_sampling_ablation(volume_tensor, subject, ct_size, voxel_spacing, de
     # One Plastimatch render at this resolution is the reference for every n_pts value below.
     img_plastimatch = generate_plastimatch_drr(volume_tensor, voxel_spacing, resolution, device)
     if img_plastimatch is None:
-        logger.warning("    Plastimatch GT unavailable — skipping ablation.")
+        logger.warning("    Plastimatch reference unavailable — skipping ablation.")
         return None
 
     results = {}
@@ -966,13 +966,13 @@ def run_dvr_sampling_ablation(volume_tensor, subject, ct_size, voxel_spacing, de
         # Dual y-axis: SSIM (quality) on the left, render time (cost) on the right.
         fig, ax1 = plt.subplots(figsize=(7, 4.5), dpi=150)
         ax2 = ax1.twinx()
-        l1, = ax1.plot(xs, ssim_ys, marker="o", color="tab:blue", label="SSIM vs Plastimatch GT")
+        l1, = ax1.plot(xs, ssim_ys, marker="o", color="tab:blue", label="SSIM vs Plastimatch reference")
         l2, = ax2.plot(xs, time_ys, marker="s", color="tab:orange", label="Render time (ms)")
         ax1.set_xscale("log", base=2)
         ax1.set_xticks(xs)
         ax1.set_xticklabels([str(n) for n in xs])
         ax1.set_xlabel("DVR samples per ray (n_pts)")
-        ax1.set_ylabel("SSIM vs Plastimatch GT", color="tab:blue")
+        ax1.set_ylabel("SSIM vs Plastimatch reference", color="tab:blue")
         ax2.set_ylabel("Render time (ms)", color="tab:orange")
         ax1.grid(True, alpha=0.3)
         ax1.set_title(f"DVR Cost vs Accuracy ({resolution}×{resolution})")
